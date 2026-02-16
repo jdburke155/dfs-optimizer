@@ -1,6 +1,6 @@
 streamlit
-   pandas
-   numpy
-   pulp
-   plotly
-   openpyxl
+pandas
+numpy
+pulp
+plotly
+openpyxl
