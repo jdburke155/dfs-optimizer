@@ -131,23 +131,29 @@ def render_player_pool():
 
     st.markdown("**Check Exclude to remove a player from all lineups.**")
 
+    # Convert decimals to readable strings BEFORE displaying
+    display_df["Ownership"] = display_df["Ownership"].apply(
+        lambda x: f"{x:.1%}" if pd.notnull(x) else ""
+    )
+    if "MakeCut" in display_df.columns:
+        display_df["MakeCut"] = display_df["MakeCut"].apply(
+            lambda x: f"{x:.0%}" if pd.notnull(x) else ""
+        )
+    if "SmallOwn" in display_df.columns:
+        display_df["SmallOwn"] = display_df["SmallOwn"].apply(
+            lambda x: f"{x:.1%}" if pd.notnull(x) else ""
+        )
+
     col_cfg = {
         "Exclude": st.column_config.CheckboxColumn("❌ Exclude"),
-        "Salary": st.column_config.NumberColumn("Salary", format="$%d"),
-        "Ownership": st.column_config.NumberColumn("Own%", format="%.1%%"),
+        "Salary":  st.column_config.NumberColumn("Salary", format="$%d"),
     }
-    if "MakeCut" in extra_cols:
-        col_cfg["MakeCut"] = st.column_config.NumberColumn("Cut%", format="%.0%%")
-    if "Value" in extra_cols:
-        col_cfg["Value"] = st.column_config.NumberColumn("Value")
-    if "Ceiling" in extra_cols:
-        col_cfg["Ceiling"] = st.column_config.NumberColumn("Ceiling")
 
     edited = st.data_editor(
         display_df,
         use_container_width=True,
         column_config=col_cfg,
-        disabled=show_cols,
+        disabled=[c for c in display_df.columns if c != "Exclude"],
         hide_index=True,
         key="pool_editor"
     )
