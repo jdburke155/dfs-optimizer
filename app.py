@@ -668,6 +668,10 @@ def render_lineup_results():
 
     # ── Export ──
     st.subheader("Export")
+
+    c1, c2 = st.columns(2)
+
+    # Standard CSV (internal use)
     rows = []
     for i, lu in enumerate(lineups):
         for p in lu:
@@ -679,8 +683,67 @@ def render_lineup_results():
                 "Projection": p["Projection"],
                 "Ownership":  f"{p['Ownership']:.1%}",
             })
-    csv = pd.DataFrame(rows).to_csv(index=False)
-    st.download_button("⬇️ Download CSV", csv, "dfs_lineups.csv", "text/csv")
+    csv_standard = pd.DataFrame(rows).to_csv(index=False)
+    c1.download_button(
+        "⬇️ Download Summary CSV",
+        csv_standard,
+        "dfs_lineups_summary.csv",
+        "text/csv"
+    )
+
+    # ── DraftKings Upload CSV ──
+    # Format: Entry ID, Contest Name, Contest ID, Entry Fee, G, G, G, G, G, G
+    # Player cells: "Player Name (PlayerID)"
+    # We need the DK player ID — stored in the 'ID' column from the original CSV
+    dk_rows = []
+    for i, lu in enumerate(lineups):
+        # Sort lineup: put highest-projection player first (cosmetic only)
+        sorted_lu = sorted(lu, key=lambda x: x["Projection"], reverse=True)
+
+        # Build player cells: "Name (ID)" — pad to 6 golfer slots
+        player_cells = []
+        for p in sorted_lu:
+            raw_id = str(p.get("ID", "")).replace("_CPT", "")
+            name   = p["Player"]
+            player_cells.append(f"{name} ({raw_id})")
+
+        # Pad to exactly 6 slots if somehow short
+        while len(player_cells) < 6:
+            player_cells.append("")
+
+        dk_rows.append({
+            "Entry ID":     "",
+            "Contest Name": "",
+            "Contest ID":   "",
+            "Entry Fee":    "",
+            "G":            player_cells[0],
+            "G.1":          player_cells[1],
+            "G.2":          player_cells[2],
+            "G.3":          player_cells[3],
+            "G.4":          player_cells[4],
+            "G.5":          player_cells[5],
+        })
+
+    dk_df = pd.DataFrame(dk_rows)
+
+    # Rename columns to match DK header exactly
+    dk_df.columns = ["Entry ID", "Contest Name", "Contest ID", "Entry Fee",
+                     "G", "G", "G", "G", "G", "G"]
+
+    dk_csv = dk_df.to_csv(index=False)
+
+    c2.download_button(
+        "🏌️ Download DraftKings Upload CSV",
+        dk_csv,
+        "dk_upload.csv",
+        "text/csv",
+        help="Upload this file directly to DraftKings"
+    )
+
+    st.caption(
+        "💡 **DraftKings Upload:** Go to your contest → My Entries → Upload Lineups → select `dk_upload.csv`. "
+        "Make sure the Player IDs in your projections CSV match your DK contest's player pool."
+    )
 
 
 def render_exposure_analysis():
