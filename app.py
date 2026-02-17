@@ -1,28 +1,24 @@
 """
-DFS Optimizer - Main Streamlit Application
-Production-ready Daily Fantasy Sports optimizer for DraftKings
+DFS Optimizer Pro - Updated Streamlit Application
+Supports native DraftKings CSV format + all new features
 """
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from typing import Optional
 import sys
 from pathlib import Path
 
-# Add backend to path
 sys.path.append(str(Path(__file__).parent))
 
 from backend.data_validator import DataValidator, PlayerPool
-from backend.game_modes import GameModes, GameMode
+from backend.game_modes import GameModes
 from backend.optimizer import OptimizerEngine
 from backend.rule_engine import RuleEngine, Rule
 from backend.monte_carlo import MonteCarloSimulator
 from backend.exposure_manager import ExposureManager
 
-
-# Page configuration
 st.set_page_config(
     page_title="DFS Optimizer Pro",
     page_icon="⚡",
@@ -30,754 +26,547 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+DK_COLUMN_MAP = {
+    "Golfer":          "Player",
+    "DK Salary":       "Salary",
+    "DK Points":       "Projection",
+    "Large Field Own": "Ownership",
+    "Small Field Own": "SmallOwn",
+    "DK Ceiling":      "Ceiling",
+    "Make Cut Odds":   "MakeCut",
+    "DK Value":        "Value",
+    "Volatility":      "Volatility",
+    "id":              "ID",
+}
+
+def normalize_dk_csv(df):
+    df = df.copy()
+    df.columns = [c.strip().lstrip("\ufeff").strip('"') for c in df.columns]
+    df = df.rename(columns={k: v for k, v in DK_COLUMN_MAP.items() if k in df.columns})
+    if "Position" not in df.columns:
+        df["Position"] = "G"
+    if "Salary" in df.columns:
+        df["Salary"] = (df["Salary"].astype(str)
+                        .str.replace("$", "", regex=False)
+                        .str.replace(",", "", regex=False)
+                        .str.strip())
+    for col in ["Ownership", "SmallOwn", "MakeCut"]:
+        if col in df.columns:
+            df[col] = (df[col].astype(str)
+                       .str.replace("%", "", regex=False).str.strip())
+            df[col] = pd.to_numeric(df[col], errors="coerce") / 100
+    for col in ["Salary", "Projection", "Ceiling", "Value", "Volatility"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "ID" not in df.columns:
+        df["ID"] = range(1, len(df) + 1)
+    else:
+        df["ID"] = df["ID"].astype(str)
+    for col in ["Team", "Game"]:
+        if col not in df.columns:
+            df[col] = ""
+    return df
+
 
 def initialize_session_state():
-    """Initialize all session state variables"""
-    if 'player_pool' not in st.session_state:
-        st.session_state.player_pool = None
-    if 'validated_data' not in st.session_state:
-        st.session_state.validated_data = None
-    if 'generated_lineups' not in st.session_state:
-        st.session_state.generated_lineups = None
-    if 'simulation_results' not in st.session_state:
-        st.session_state.simulation_results = None
-    if 'exposure_manager' not in st.session_state:
-        st.session_state.exposure_manager = ExposureManager()
-    if 'rule_engine' not in st.session_state:
-        st.session_state.rule_engine = RuleEngine()
-    if 'game_mode' not in st.session_state:
-        st.session_state.game_mode = 'Golf Classic'
-
-
-def render_header():
-    """Render application header"""
-    st.title("⚡ DFS Optimizer Pro")
-    st.markdown("**Professional DraftKings Golf Optimizer** | MILP-Based | Tournament & Cash Games")
-    st.markdown("---")
+    defaults = {
+        "player_pool": None,
+        "validated_data": None,
+        "generated_lineups": None,
+        "simulation_results": None,
+        "exposure_manager": ExposureManager(),
+        "rule_engine": RuleEngine(),
+        "game_mode": "Golf Classic",
+        "excluded_players": set(),
+        "player_min_own": {},
+        "player_max_own": {},
+        "custom_rules": [],
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 
 def render_file_upload():
-    """Render file upload section"""
     st.header("1️⃣ Data Import")
-    
     uploaded_file = st.file_uploader(
-        "Upload Player CSV",
-        type=['csv'],
-        help="Required columns: Player, Position, Salary, Projection, Ownership"
+        "Upload DraftKings CSV (native DK export or custom)",
+        type=["csv"],
+        help="Supports native DraftKings PGA export format automatically"
     )
-    
-    if uploaded_file is not None:
+    if uploaded_file:
         try:
-            df = pd.read_csv(uploaded_file)
-            
-            # Validate data
+            raw_df = pd.read_csv(uploaded_file)
+            df = normalize_dk_csv(raw_df)
             validator = DataValidator()
             validated_df, stats = validator.validate_and_process(df)
-            
-            # Store in session state
             st.session_state.validated_data = validated_df
             st.session_state.player_pool = PlayerPool(validated_df)
-            
-            # Display validation results
-            st.success(f"✅ Successfully loaded {stats['total_players']} players")
-            
-            # Show warnings if any
-            if validator.warnings:
-                for warning in validator.warnings:
-                    st.warning(warning)
-            
-            # Display statistics
+            st.session_state.excluded_players = set()
+            st.success(f"✅ Loaded {stats['total_players']} players")
             col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Total Players", stats['total_players'])
-            with col2:
-                st.metric("Salary Range", f"${stats['salary_min']:,} - ${stats['salary_max']:,}")
-            with col3:
-                st.metric("Proj Range", f"{stats['projection_min']:.1f} - {stats['projection_max']:.1f}")
-            with col4:
-                st.metric("Ownership Range", f"{stats['ownership_min']:.1%} - {stats['ownership_max']:.1%}")
-            
-            # Position breakdown
-            with st.expander("📊 Position Breakdown"):
-                pos_df = pd.DataFrame.from_dict(stats['position_breakdown'], orient='index', columns=['Count'])
-                st.dataframe(pos_df)
-            
-            # Show duplicates if any
-            if stats['duplicates'] > 0:
-                st.warning(f"⚠️ Found {stats['duplicates']} duplicate players")
-            
-            # Show editable player table
-            with st.expander("✏️ Edit Player Data"):
-                render_player_editor()
-                
+            col1.metric("Players", stats["total_players"])
+            col2.metric("Salary Range", f"${stats['salary_min']:,.0f} – ${stats['salary_max']:,.0f}")
+            col3.metric("Proj Range", f"{stats['projection_min']:.1f} – {stats['projection_max']:.1f}")
+            col4.metric("Own Range", f"{stats['ownership_min']:.1%} – {stats['ownership_max']:.1%}")
         except Exception as e:
-            st.error(f"❌ Error loading file: {str(e)}")
+            st.error(f"❌ Error: {e}")
+            import traceback; st.code(traceback.format_exc())
 
 
-def render_player_editor():
-    """Render player data editor"""
+def render_player_pool():
+    st.header("2️⃣ Player Pool Manager")
     if st.session_state.player_pool is None:
+        st.info("Upload data first.")
         return
-    
     df = st.session_state.player_pool.get_player_data()
-    
-    st.write("**Edit projections and ownership:**")
-    
-    # Select player to edit
-    player_names = df['Player'].tolist()
-    selected_player = st.selectbox("Select Player", player_names, key="edit_player")
-    
-    if selected_player:
-        player_data = df[df['Player'] == selected_player].iloc[0]
-        player_id = player_data['ID']
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            new_proj = st.number_input(
-                "Projection",
-                value=float(player_data['Projection']),
-                step=0.5,
-                key=f"proj_{player_id}"
-            )
-            
-            if st.button("Update Projection", key=f"update_proj_{player_id}"):
-                st.session_state.player_pool.update_projection(player_id, new_proj)
-                st.success("Projection updated!")
-                st.rerun()
-        
-        with col2:
-            new_own = st.number_input(
-                "Ownership %",
-                value=float(player_data['Ownership'] * 100),
-                min_value=0.0,
-                max_value=100.0,
-                step=1.0,
-                key=f"own_{player_id}"
-            )
-            
-            if st.button("Update Ownership", key=f"update_own_{player_id}"):
-                st.session_state.player_pool.update_ownership(player_id, new_own / 100)
-                st.success("Ownership updated!")
+    excluded = st.session_state.excluded_players
+
+    base_cols = ["Player", "Salary", "Projection", "Ownership"]
+    extra_cols = [c for c in ["MakeCut", "Value", "Ceiling", "SmallOwn", "Volatility"] if c in df.columns]
+    show_cols = base_cols + extra_cols
+
+    display_df = df[show_cols].copy()
+    display_df.insert(0, "Exclude", display_df.index.map(lambda i: df.loc[i, "Player"] in excluded))
+
+    st.markdown("**Check Exclude to remove a player from all lineups.**")
+
+    col_cfg = {
+        "Exclude": st.column_config.CheckboxColumn("❌ Exclude"),
+        "Salary": st.column_config.NumberColumn("Salary", format="$%d"),
+        "Ownership": st.column_config.NumberColumn("Own%", format="%.1%%"),
+    }
+    if "MakeCut" in extra_cols:
+        col_cfg["MakeCut"] = st.column_config.NumberColumn("Cut%", format="%.0%%")
+    if "Value" in extra_cols:
+        col_cfg["Value"] = st.column_config.NumberColumn("Value")
+    if "Ceiling" in extra_cols:
+        col_cfg["Ceiling"] = st.column_config.NumberColumn("Ceiling")
+
+    edited = st.data_editor(
+        display_df,
+        use_container_width=True,
+        column_config=col_cfg,
+        disabled=show_cols,
+        hide_index=True,
+        key="pool_editor"
+    )
+
+    new_excluded = set()
+    for i, row in edited.iterrows():
+        if row["Exclude"]:
+            new_excluded.add(df.loc[i, "Player"])
+    st.session_state.excluded_players = new_excluded
+
+    if new_excluded:
+        st.warning(f"⛔ {len(new_excluded)} players excluded: {', '.join(sorted(new_excluded))}")
+
+    st.subheader("Individual Ownership Bounds")
+    player_names = df["Player"].tolist()
+    sel = st.selectbox("Player", player_names, key="own_override_sel")
+    if sel:
+        pid = str(df[df["Player"] == sel].iloc[0]["ID"])
+        cur_min = int(st.session_state.player_min_own.get(pid, 0) * 100)
+        cur_max = int(st.session_state.player_max_own.get(pid, 1) * 100)
+        c1, c2 = st.columns(2)
+        new_min = c1.number_input("Min Ownership %", 0, 100, cur_min, key=f"min_{pid}")
+        new_max = c2.number_input("Max Ownership %", 0, 100, cur_max, key=f"max_{pid}")
+        if st.button("Save Bounds"):
+            st.session_state.player_min_own[pid] = new_min / 100
+            st.session_state.player_max_own[pid] = new_max / 100
+            st.success(f"Set {sel}: min {new_min}%, max {new_max}%")
+
+    if st.session_state.player_min_own or st.session_state.player_max_own:
+        all_pids = set(list(st.session_state.player_min_own) + list(st.session_state.player_max_own))
+        rows = []
+        for pid in all_pids:
+            match = df[df["ID"].astype(str) == str(pid)]
+            if match.empty:
+                continue
+            rows.append({
+                "Player": match.iloc[0]["Player"],
+                "Min Own": f"{st.session_state.player_min_own.get(pid, 0):.0%}",
+                "Max Own": f"{st.session_state.player_max_own.get(pid, 1):.0%}",
+            })
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            if st.button("Clear All Ownership Bounds"):
+                st.session_state.player_min_own = {}
+                st.session_state.player_max_own = {}
                 st.rerun()
 
 
 def render_game_mode_selector():
-    """Render game mode selection"""
-    st.header("2️⃣ Game Mode")
-    
+    st.header("3️⃣ Game Mode")
     modes = GameModes.get_all_modes()
     mode_names = list(modes.keys())
-    
-    selected_mode = st.selectbox(
-        "Select Contest Type",
-        mode_names,
-        index=mode_names.index(st.session_state.game_mode),
-        help="Choose the DraftKings contest format"
-    )
-    
-    st.session_state.game_mode = selected_mode
-    
-    # Show mode details
-    mode = modes[selected_mode]
+    selected = st.selectbox("Contest Type", mode_names,
+                            index=mode_names.index(st.session_state.game_mode))
+    st.session_state.game_mode = selected
+    mode = modes[selected]
     st.info(f"**{mode.description}**")
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Roster Size", mode.roster_size)
-    with col2:
-        st.metric("Salary Cap", f"${mode.salary_cap:,}")
-    with col3:
-        if mode.has_captain:
-            st.metric("Captain Multiplier", f"{mode.captain_multiplier}x")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Roster Size", mode.roster_size)
+    c2.metric("Salary Cap", f"${mode.salary_cap:,}")
+    if mode.has_captain:
+        c3.metric("Captain Multiplier", f"{mode.captain_multiplier}x")
 
 
 def render_optimization_settings():
-    """Render optimization settings"""
-    st.header("3️⃣ Optimization Settings")
-    
-    # Optimization mode
-    opt_mode = st.radio(
-        "Optimization Mode",
-        ["Cash Game", "Tournament"],
-        help="Cash: Pure projection max | Tournament: Projection + ownership leverage"
+    st.header("4️⃣ Optimization Settings")
+    opt_mode = st.radio("Mode", ["Cash Game", "Tournament"])
+    c1, c2 = st.columns(2)
+    num_lineups = c1.slider("Number of Lineups", 1, 150, 20 if opt_mode == "Tournament" else 3)
+    min_salary = c1.number_input("Min Salary Floor", 0, 50000, 0, 1000)
+    unique_players = c1.selectbox(
+        "Minimum Unique Players Per Lineup",
+        options=[1, 2, 3, 4, 5, 6], index=0,
+        help="Each lineup must differ from prior lineups by at least this many players"
     )
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        num_lineups = st.slider(
-            "Number of Lineups",
-            min_value=1,
-            max_value=150,
-            value=20 if opt_mode == "Tournament" else 3,
-            help="Generate 1-150 unique lineups"
-        )
-        
-        min_salary = st.number_input(
-            "Minimum Salary Floor",
-            min_value=0,
-            max_value=50000,
-            value=0,
-            step=1000,
-            help="Optional minimum total salary"
-        )
-    
-    with col2:
-        variance_pct = st.slider(
-            "Projection Variance %",
-            min_value=0.0,
-            max_value=50.0,
-            value=15.0 if opt_mode == "Tournament" else 0.0,
-            step=1.0,
-            help="Random variance for projection diversification (0% = deterministic)"
-        ) / 100
-        
-        if opt_mode == "Tournament":
-            proj_weight = st.slider(
-                "Projection Weight %",
-                min_value=0,
-                max_value=100,
-                value=70,
-                help="Weight given to raw projection"
-            ) / 100
-            
-            own_weight = st.slider(
-                "Ownership Leverage Weight %",
-                min_value=0,
-                max_value=100,
-                value=30,
-                help="Weight given to ownership leverage"
-            ) / 100
-            
-            own_penalty = st.slider(
-                "High Ownership Penalty Threshold %",
-                min_value=0,
-                max_value=50,
-                value=15,
-                help="Ownership % above which to penalize"
-            ) / 100
-        else:
-            proj_weight = 1.0
-            own_weight = 0.0
-            own_penalty = 1.0
-    
+    variance_pct = c2.slider("Variance %", 0.0, 50.0, 15.0 if opt_mode == "Tournament" else 0.0, 1.0) / 100
+    if opt_mode == "Tournament":
+        proj_weight = c2.slider("Projection Weight %", 0, 100, 70) / 100
+        own_weight  = c2.slider("Ownership Leverage %", 0, 100, 30) / 100
+        own_penalty = c2.slider("High-Own Penalty Threshold %", 0, 50, 15) / 100
+    else:
+        proj_weight, own_weight, own_penalty = 1.0, 0.0, 1.0
     return {
-        'mode': opt_mode,
-        'num_lineups': num_lineups,
-        'min_salary': min_salary if min_salary > 0 else None,
-        'variance_pct': variance_pct,
-        'projection_weight': proj_weight,
-        'ownership_weight': own_weight,
-        'ownership_penalty_threshold': own_penalty
+        "mode": opt_mode,
+        "num_lineups": num_lineups,
+        "min_salary": min_salary if min_salary > 0 else None,
+        "variance_pct": variance_pct,
+        "projection_weight": proj_weight,
+        "ownership_weight": own_weight,
+        "ownership_penalty_threshold": own_penalty,
+        "unique_players": unique_players,
     }
 
 
 def render_exposure_controls():
-    """Render exposure management controls"""
-    st.header("4️⃣ Exposure & Player Controls")
-    
+    st.header("5️⃣ Exposure & Boost Controls")
     if st.session_state.player_pool is None:
-        st.warning("Please upload player data first")
+        st.info("Upload data first.")
         return
-    
     df = st.session_state.player_pool.get_player_data()
-    
-    tab1, tab2, tab3 = st.tabs(["Lock/Unlock", "Boost/Dock", "Exposure Limits"])
-    
-    with tab1:
-        st.subheader("Lock Players (100% Exposure)")
-        
-        player_names = df['Player'].tolist()
-        selected_lock = st.multiselect(
-            "Select players to lock",
-            player_names,
-            help="These players will appear in every lineup"
-        )
-        
+    player_names = df["Player"].tolist()
+    t1, t2, t3 = st.tabs(["🔒 Lock Players", "⚡ Boost / Dock", "📊 Exposure Limits"])
+    with t1:
+        locked = st.multiselect("Lock into every lineup", player_names)
         if st.button("Apply Locks"):
             st.session_state.exposure_manager.clear_all()
-            for player_name in selected_lock:
-                player_id = df[df['Player'] == player_name].iloc[0]['ID']
-                st.session_state.exposure_manager.set_lock(player_id, True)
-            st.success(f"Locked {len(selected_lock)} players")
-    
-    with tab2:
-        st.subheader("Boost/Dock Projections")
-        
-        selected_player = st.selectbox("Select Player", player_names, key="boost_player")
-        
-        if selected_player:
-            boost_pct = st.slider(
-                "Boost/Dock %",
-                min_value=-50,
-                max_value=100,
-                value=0,
-                help="Positive = boost, Negative = dock"
-            )
-            
-            if st.button("Apply Boost/Dock"):
-                player_id = df[df['Player'] == selected_player].iloc[0]['ID']
-                st.session_state.exposure_manager.set_projection_boost(player_id, boost_pct)
-                st.success(f"Applied {boost_pct:+d}% adjustment to {selected_player}")
-    
-    with tab3:
-        st.subheader("Exposure Limits")
-        
-        selected_player_exp = st.selectbox("Select Player", player_names, key="exp_player")
-        
-        if selected_player_exp:
-            max_exp = st.slider(
-                "Maximum Exposure %",
-                min_value=0,
-                max_value=100,
-                value=100,
-                help="Maximum % of lineups this player can appear in"
-            ) / 100
-            
-            if st.button("Set Max Exposure"):
-                player_id = df[df['Player'] == selected_player_exp].iloc[0]['ID']
-                st.session_state.exposure_manager.set_max_exposure(player_id, max_exp)
-                st.success(f"Set max exposure {max_exp:.0%} for {selected_player_exp}")
+            for name in locked:
+                pid = df[df["Player"] == name].iloc[0]["ID"]
+                st.session_state.exposure_manager.set_lock(pid, True)
+            st.success(f"Locked {len(locked)} players")
+    with t2:
+        sel = st.selectbox("Player", player_names, key="boost_sel")
+        boost = st.slider("Boost / Dock %", -50, 100, 0)
+        if st.button("Apply Boost"):
+            pid = df[df["Player"] == sel].iloc[0]["ID"]
+            st.session_state.exposure_manager.set_projection_boost(pid, boost)
+            st.success(f"{sel}: {boost:+d}%")
+    with t3:
+        sel2 = st.selectbox("Player", player_names, key="exp_sel")
+        max_exp = st.slider("Max Exposure %", 0, 100, 100) / 100
+        if st.button("Set Limit"):
+            pid = df[df["Player"] == sel2].iloc[0]["ID"]
+            st.session_state.exposure_manager.set_max_exposure(pid, max_exp)
+            st.success(f"{sel2}: max {max_exp:.0%}")
 
 
 def render_rule_engine():
-    """Render custom rule engine"""
-    st.header("5️⃣ Custom Rules")
-    
+    st.header("6️⃣ Rules Engine")
     if st.session_state.player_pool is None:
-        st.warning("Please upload player data first")
+        st.info("Upload data first.")
         return
-    
     df = st.session_state.player_pool.get_player_data()
-    
-    # Display current rules
-    rules = st.session_state.rule_engine.get_rules_summary()
-    if rules:
-        st.write("**Active Rules:**")
-        for rule in rules:
-            st.write(f"- {rule}")
-        
-        if st.button("Clear All Rules"):
+    player_names = df["Player"].tolist()
+
+    st.subheader("Structural Rules")
+    preset_rules = st.session_state.rule_engine.get_rules_summary()
+    if preset_rules:
+        for r in preset_rules:
+            st.write(f"• {r}")
+        if st.button("Clear Structural Rules"):
             st.session_state.rule_engine.clear_rules()
-            st.success("All rules cleared")
             st.rerun()
-    
-    # Add new rule
-    st.subheader("Add New Rule")
-    
-    rule_type = st.selectbox(
-        "Rule Type",
-        [
-            "At least one of (players)",
-            "Max from team",
-            "Min salary threshold",
-            "Max salary on expensive players"
-        ]
-    )
-    
+
+    rule_type = st.selectbox("Add Structural Rule", [
+        "At least one of (players)", "Max players from team",
+        "Min salary threshold", "Max salary on expensive players",
+    ])
     if rule_type == "At least one of (players)":
-        selected_players = st.multiselect(
-            "Select Players",
-            df['Player'].tolist()
-        )
-        
-        if st.button("Add Rule", key="add_rule_1") and selected_players:
-            rule = Rule(
+        picks = st.multiselect("Players", player_names, key="r1")
+        if st.button("Add", key="add_r1") and picks:
+            st.session_state.rule_engine.add_rule(Rule(
                 rule_type="at_least_one_of",
-                description=f"At least one of: {', '.join(selected_players)}",
-                params={'players': selected_players}
-            )
-            st.session_state.rule_engine.add_rule(rule)
-            st.success("Rule added!")
+                description=f"At least one of: {', '.join(picks)}",
+                params={"players": picks}
+            ))
             st.rerun()
-    
-    elif rule_type == "Max from team":
-        teams = df['Team'].unique().tolist()
-        team = st.selectbox("Team", teams)
-        max_count = st.number_input("Max players", min_value=0, max_value=6, value=2)
-        
-        if st.button("Add Rule", key="add_rule_2") and team:
-            rule = Rule(
-                rule_type="max_from_team",
-                description=f"Max {max_count} from {team}",
-                params={'team': team, 'max_count': max_count}
-            )
-            st.session_state.rule_engine.add_rule(rule)
-            st.success("Rule added!")
-            st.rerun()
-    
+    elif rule_type == "Max players from team":
+        teams = [t for t in df["Team"].unique().tolist() if t]
+        if teams:
+            team = st.selectbox("Team", teams)
+            mx = st.number_input("Max", 0, 6, 2)
+            if st.button("Add", key="add_r2"):
+                st.session_state.rule_engine.add_rule(Rule(
+                    rule_type="max_from_team",
+                    description=f"Max {mx} from {team}",
+                    params={"team": team, "max_count": mx}
+                ))
+                st.rerun()
+        else:
+            st.info("No team data in your CSV.")
     elif rule_type == "Min salary threshold":
-        min_sal = st.number_input("Minimum Total Salary", min_value=0, max_value=50000, value=48000, step=1000)
-        
-        if st.button("Add Rule", key="add_rule_3"):
-            rule = Rule(
+        mn = st.number_input("Min Total Salary", 0, 50000, 48000, 500)
+        if st.button("Add", key="add_r3"):
+            st.session_state.rule_engine.add_rule(Rule(
                 rule_type="min_salary_threshold",
-                description=f"Minimum salary: ${min_sal:,}",
-                params={'min_salary': min_sal}
-            )
-            st.session_state.rule_engine.add_rule(rule)
-            st.success("Rule added!")
+                description=f"Min salary ${mn:,}",
+                params={"min_salary": mn}
+            ))
             st.rerun()
-    
     elif rule_type == "Max salary on expensive players":
-        threshold = st.number_input("Expensive threshold", min_value=5000, max_value=15000, value=10000, step=1000)
-        max_sal = st.number_input("Max salary on expensive", min_value=0, max_value=50000, value=20000, step=1000)
-        
-        if st.button("Add Rule", key="add_rule_4"):
-            rule = Rule(
+        thr = st.number_input("Expensive threshold $", 5000, 15000, 10000, 500)
+        mx_sal = st.number_input("Max $ on expensive", 0, 50000, 20000, 500)
+        if st.button("Add", key="add_r4"):
+            st.session_state.rule_engine.add_rule(Rule(
                 rule_type="max_salary_on_expensive",
-                description=f"Max ${max_sal:,} on players >${threshold:,}",
-                params={'threshold': threshold, 'max_salary': max_sal}
-            )
-            st.session_state.rule_engine.add_rule(rule)
-            st.success("Rule added!")
+                description=f"Max ${mx_sal:,} on players >${thr:,}",
+                params={"threshold": thr, "max_salary": mx_sal}
+            ))
             st.rerun()
+
+    st.divider()
+    st.subheader("Conditional Rules (projection adjustments)")
+    st.caption("Adjust a player's projection based on whether another player is in the lineup.")
+
+    with st.expander("➕ Create Conditional Rule"):
+        trigger = st.selectbox("IF I use…", player_names, key="trig")
+        action  = st.selectbox("THEN…", ["Boost another player's projection", "Dock another player's projection"], key="act")
+        target  = st.selectbox("…apply to:", player_names, key="tgt")
+        amount  = st.slider("By % amount", 1, 100, 10, key="cond_amt")
+        label   = st.text_input("Label (optional)", key="cond_note",
+                                placeholder="e.g. Scheffler + Rory stack")
+        if st.button("Save Conditional Rule"):
+            direction = "boost" if "Boost" in action else "dock"
+            st.session_state.custom_rules.append({
+                "trigger": trigger, "target": target,
+                "direction": direction, "amount": amount,
+                "label": label or f"If {trigger} → {direction} {target} {amount}%"
+            })
+            st.success("Rule saved!")
+            st.rerun()
+
+    if st.session_state.custom_rules:
+        st.markdown("**Active Conditional Rules:**")
+        for i, r in enumerate(st.session_state.custom_rules):
+            c1, c2 = st.columns([5, 1])
+            c1.write(f"• {r['label']}")
+            if c2.button("🗑️", key=f"del_cr_{i}"):
+                st.session_state.custom_rules.pop(i)
+                st.rerun()
+
+
+def apply_conditional_rules_to_pool(df, lineup_so_far):
+    """Apply conditional projection rules based on current lineup."""
+    df = df.copy()
+    lineup_names = {p["Player"] for p in lineup_so_far}
+    for rule in st.session_state.custom_rules:
+        if rule["trigger"] in lineup_names:
+            mask = df["Player"] == rule["target"]
+            if mask.any():
+                mult = 1 + rule["amount"] / 100 if rule["direction"] == "boost" else 1 - rule["amount"] / 100
+                df.loc[mask, "Projection"] *= mult
+    return df
+
+
+def get_active_pool(df):
+    excluded = st.session_state.excluded_players
+    if excluded:
+        df = df[~df["Player"].isin(excluded)].copy()
+    return df.reset_index(drop=True)
 
 
 def render_optimization_button(settings):
-    """Render optimize button and execute optimization"""
-    st.header("6️⃣ Generate Lineups")
-    
+    st.header("7️⃣ Generate Lineups")
     if st.session_state.player_pool is None:
-        st.warning("Please upload player data first")
+        st.warning("Upload data first.")
         return
-    
-    # Validate rules
-    df = st.session_state.player_pool.get_player_data()
+
+    df_full = st.session_state.player_pool.get_player_data()
+    df = get_active_pool(df_full)
+
+    if df.empty:
+        st.error("No players left after exclusions!")
+        return
+
     rules_valid, errors = st.session_state.rule_engine.validate_all(df)
-    
     if not rules_valid:
-        st.error("❌ Rule validation failed:")
-        for error in errors:
-            st.error(error)
+        for e in errors:
+            st.error(e)
         return
-    
+
     if st.button("🚀 Generate Lineups", type="primary", use_container_width=True):
-        with st.spinner("Optimizing lineups..."):
+        with st.spinner("Optimizing…"):
             try:
-                # Apply projection boosts
-                adjusted_pool = st.session_state.exposure_manager.apply_projection_adjustments(df)
-                
-                # Get game mode
+                adjusted = st.session_state.exposure_manager.apply_projection_adjustments(df)
+                # Apply conditional rules (use empty lineup as starting context)
+                adjusted = apply_conditional_rules_to_pool(adjusted, [])
                 game_mode = GameModes.get_mode(st.session_state.game_mode)
-                
-                # Create optimizer
+                locked = st.session_state.exposure_manager.get_locked_players()
                 optimizer = OptimizerEngine(
-                    player_pool=adjusted_pool,
+                    player_pool=adjusted,
                     game_mode=game_mode,
-                    rule_engine=st.session_state.rule_engine
+                    rule_engine=st.session_state.rule_engine,
+                    min_unique_players=settings["unique_players"],
+                    player_min_own=st.session_state.player_min_own,
+                    player_max_own=st.session_state.player_max_own,
                 )
-                
-                # Get locked players
-                locked_players = st.session_state.exposure_manager.get_locked_players()
-                
-                # Optimize based on mode
-                if settings['mode'] == "Cash Game":
+                if settings["mode"] == "Cash Game":
                     lineups = optimizer.optimize_cash(
-                        num_lineups=settings['num_lineups'],
-                        min_salary=settings['min_salary'],
-                        locked_players=locked_players,
-                        variance_pct=settings['variance_pct']
+                        num_lineups=settings["num_lineups"],
+                        min_salary=settings["min_salary"],
+                        locked_players=locked,
+                        variance_pct=settings["variance_pct"],
                     )
                 else:
                     lineups = optimizer.optimize_tournament(
-                        num_lineups=settings['num_lineups'],
-                        projection_weight=settings['projection_weight'],
-                        ownership_weight=settings['ownership_weight'],
-                        ownership_penalty_threshold=settings['ownership_penalty_threshold'],
-                        min_salary=settings['min_salary'],
-                        locked_players=locked_players,
-                        variance_pct=settings['variance_pct']
+                        num_lineups=settings["num_lineups"],
+                        projection_weight=settings["projection_weight"],
+                        ownership_weight=settings["ownership_weight"],
+                        ownership_penalty_threshold=settings["ownership_penalty_threshold"],
+                        min_salary=settings["min_salary"],
+                        locked_players=locked,
+                        variance_pct=settings["variance_pct"],
                     )
-                
                 if not lineups:
-                    st.error("❌ No feasible lineups found. Try relaxing constraints.")
+                    st.error("No feasible lineups found. Try relaxing constraints.")
                     return
-                
-                # Store lineups
                 st.session_state.generated_lineups = lineups
-                
                 st.success(f"✅ Generated {len(lineups)} unique lineups!")
-                
             except Exception as e:
-                st.error(f"❌ Optimization error: {str(e)}")
-                import traceback
-                st.error(traceback.format_exc())
+                st.error(f"❌ Error: {e}")
+                import traceback; st.code(traceback.format_exc())
 
 
 def render_lineup_results():
-    """Render generated lineup results"""
-    if st.session_state.generated_lineups is None:
+    if not st.session_state.generated_lineups:
         return
-    
-    st.header("7️⃣ Generated Lineups")
-    
+    st.header("8️⃣ Generated Lineups")
     lineups = st.session_state.generated_lineups
-    
-    # Sort options
-    sort_by = st.selectbox(
-        "Sort by",
-        ["Projection", "Salary", "Ownership", "Combinatorial Ownership"]
-    )
-    
-    # Calculate stats for all lineups
-    lineup_stats = []
-    for i, lineup in enumerate(lineups):
-        stats = OptimizerEngine.calculate_lineup_stats(lineup)
-        stats['lineup_num'] = i + 1
-        lineup_stats.append(stats)
-    
-    # Sort
-    if sort_by == "Projection":
-        lineup_stats.sort(key=lambda x: x['total_projection'], reverse=True)
-    elif sort_by == "Salary":
-        lineup_stats.sort(key=lambda x: x['total_salary'], reverse=True)
-    elif sort_by == "Ownership":
-        lineup_stats.sort(key=lambda x: x['avg_ownership'])
-    else:
-        lineup_stats.sort(key=lambda x: x['combinatorial_ownership'])
-    
-    # Display summary table
-    summary_data = []
-    for stats in lineup_stats:
-        summary_data.append({
-            'Lineup': stats['lineup_num'],
-            'Projection': f"{stats['total_projection']:.2f}",
-            'Salary': f"${stats['total_salary']:,}",
-            'Avg Own': f"{stats['avg_ownership']:.1%}",
-            'Comb Own': f"{stats['combinatorial_ownership']:.2%}"
-        })
-    
-    st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
-    
-    # Detailed lineup view
-    st.subheader("Detailed Lineups")
-    
-    selected_lineup_num = st.selectbox(
-        "Select Lineup to View",
-        [s['lineup_num'] for s in lineup_stats]
-    )
-    
-    selected_lineup = lineups[selected_lineup_num - 1]
-    
-    lineup_df = pd.DataFrame(selected_lineup)
-    st.dataframe(lineup_df, use_container_width=True)
-    
-    # Download lineups
-    st.subheader("Export Lineups")
-    
-    # Create export dataframe
-    export_data = []
-    for i, lineup in enumerate(lineups):
-        for player in lineup:
-            export_data.append({
-                'Lineup': i + 1,
-                'Player': player['Player'],
-                'Position': player['Position'],
-                'Salary': player['Salary'],
-                'Projection': player['Projection'],
-                'Ownership': f"{player['Ownership']:.1%}"
+    sort_by = st.selectbox("Sort by", ["Projection", "Salary", "Avg Ownership", "Combinatorial Ownership"])
+    stats_list = []
+    for i, lu in enumerate(lineups):
+        s = OptimizerEngine.calculate_lineup_stats(lu)
+        s["lineup_num"] = i + 1
+        stats_list.append(s)
+    key_map = {
+        "Projection": ("total_projection", True),
+        "Salary": ("total_salary", True),
+        "Avg Ownership": ("avg_ownership", False),
+        "Combinatorial Ownership": ("combinatorial_ownership", False),
+    }
+    sk, rev = key_map[sort_by]
+    stats_list.sort(key=lambda x: x[sk], reverse=rev)
+    summary = pd.DataFrame([{
+        "Lineup": s["lineup_num"],
+        "Projection": f"{s['total_projection']:.2f}",
+        "Salary": f"${s['total_salary']:,}",
+        "Avg Own": f"{s['avg_ownership']:.1%}",
+        "Comb Own": f"{s['combinatorial_ownership']:.2%}",
+    } for s in stats_list])
+    st.dataframe(summary, use_container_width=True)
+    sel_num = st.selectbox("View Lineup Detail", [s["lineup_num"] for s in stats_list])
+    lu = lineups[sel_num - 1]
+    lu_df = pd.DataFrame(lu)
+    disp = [c for c in ["Player", "Position", "Salary", "Projection", "Ownership"] if c in lu_df.columns]
+    st.dataframe(lu_df[disp], use_container_width=True)
+    st.subheader("Export")
+    rows = []
+    for i, lu in enumerate(lineups):
+        for p in lu:
+            rows.append({
+                "Lineup": i + 1, "Player": p["Player"],
+                "Position": p["Position"], "Salary": p["Salary"],
+                "Projection": p["Projection"], "Ownership": f"{p['Ownership']:.1%}",
             })
-    
-    export_df = pd.DataFrame(export_data)
-    csv = export_df.to_csv(index=False)
-    
-    st.download_button(
-        label="Download Lineups (CSV)",
-        data=csv,
-        file_name="dfs_lineups.csv",
-        mime="text/csv"
-    )
+    csv = pd.DataFrame(rows).to_csv(index=False)
+    st.download_button("⬇️ Download CSV", csv, "dfs_lineups.csv", "text/csv")
 
 
 def render_exposure_analysis():
-    """Render exposure analysis"""
-    if st.session_state.generated_lineups is None:
+    if not st.session_state.generated_lineups:
         return
-    
-    st.header("8️⃣ Exposure Analysis")
-    
-    lineups = st.session_state.generated_lineups
-    exposure_df = st.session_state.exposure_manager.calculate_exposure(lineups)
-    
-    if exposure_df.empty:
-        st.warning("No exposure data available")
+    st.header("9️⃣ Exposure Analysis")
+    exp_df = st.session_state.exposure_manager.calculate_exposure(st.session_state.generated_lineups)
+    if exp_df.empty:
         return
-    
-    # Display exposure table
-    st.dataframe(
-        exposure_df[['Player', 'Exposure', 'Count', 'Salary', 'Projection', 'Ownership']],
-        use_container_width=True
-    )
-    
-    # Exposure distribution chart
-    fig = px.bar(
-        exposure_df.head(20),
-        x='Player',
-        y='Exposure',
-        title='Top 20 Players by Exposure',
-        labels={'Exposure': 'Exposure %'},
-        color='Exposure',
-        color_continuous_scale='Viridis'
-    )
+    disp = [c for c in ["Player", "Exposure", "Count", "Salary", "Projection", "Ownership"] if c in exp_df.columns]
+    st.dataframe(exp_df[disp], use_container_width=True)
+    fig = px.bar(exp_df.head(20), x="Player", y="Exposure",
+                 color="Exposure", color_continuous_scale="Viridis",
+                 title="Top 20 Players by Exposure")
     fig.update_layout(xaxis_tickangle=-45)
     st.plotly_chart(fig, use_container_width=True)
-    
-    # Exposure statistics
-    stats = ExposureManager.analyze_exposure_distribution(exposure_df)
-    
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Players Used", stats['total_players_used'])
-    with col2:
-        st.metric("Avg Exposure", f"{stats['avg_exposure']:.1%}")
-    with col3:
-        st.metric("Concentrated (>50%)", stats['concentrated_players'])
-    with col4:
-        st.metric("Rare (<10%)", stats['rare_players'])
 
 
 def render_monte_carlo():
-    """Render Monte Carlo simulation"""
-    if st.session_state.generated_lineups is None:
+    if not st.session_state.generated_lineups:
         return
-    
-    st.header("9️⃣ Monte Carlo Simulation")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        num_simulations = st.slider(
-            "Number of Simulations",
-            min_value=1000,
-            max_value=20000,
-            value=10000,
-            step=1000,
-            help="More simulations = more accurate but slower"
-        )
-    
-    with col2:
-        variance_pct = st.slider(
-            "Variance %",
-            min_value=5,
-            max_value=50,
-            value=20,
-            help="Standard deviation as % of projection"
-        ) / 100
-    
-    field_size = st.number_input(
-        "Tournament Field Size",
-        min_value=10,
-        max_value=10000,
-        value=100,
-        help="Number of entries in tournament"
-    )
-    
-    if st.button("Run Simulation", type="primary"):
-        with st.spinner("Running Monte Carlo simulation..."):
-            try:
-                simulator = MonteCarloSimulator(variance_pct=variance_pct)
-                
-                lineups = st.session_state.generated_lineups
-                results = simulator.simulate_lineups(
-                    lineups,
-                    num_simulations=num_simulations,
-                    field_size=field_size
-                )
-                
-                st.session_state.simulation_results = results
-                
-                st.success("✅ Simulation complete!")
-                
-            except Exception as e:
-                st.error(f"❌ Simulation error: {str(e)}")
-    
-    # Display results
-    if st.session_state.simulation_results is not None:
-        render_simulation_results()
-
-
-def render_simulation_results():
-    """Display Monte Carlo simulation results"""
-    results = st.session_state.simulation_results
-    
-    st.subheader("Simulation Results")
-    
-    # Summary table
-    summary_data = []
-    for result in results:
-        summary_data.append({
-            'Lineup': result['lineup_idx'] + 1,
-            'Mean Score': f"{result['mean_score']:.2f}",
-            'Std Dev': f"{result['std_score']:.2f}",
-            '10th %ile': f"{result['percentile_10']:.2f}",
-            '90th %ile': f"{result['percentile_90']:.2f}",
-            '99th %ile': f"{result['percentile_99']:.2f}",
-            'Win Prob': f"{result['win_probability']:.2%}",
-            'Top 1%': f"{result['top1_probability']:.2%}"
-        })
-    
-    summary_df = pd.DataFrame(summary_data)
-    st.dataframe(summary_df, use_container_width=True)
-    
-    # Select lineup for detailed view
-    selected_sim_lineup = st.selectbox(
-        "Select Lineup for Detailed View",
-        [i + 1 for i in range(len(results))]
-    )
-    
-    result = results[selected_sim_lineup - 1]
-    
-    # Score distribution
-    fig = go.Figure()
-    fig.add_trace(go.Histogram(
-        x=result['simulated_scores'],
-        nbinsx=50,
-        name='Score Distribution'
-    ))
-    fig.add_vline(x=result['mean_score'], line_dash="dash", line_color="red", annotation_text="Mean")
-    fig.add_vline(x=result['percentile_10'], line_dash="dot", line_color="orange", annotation_text="10th %ile")
-    fig.add_vline(x=result['percentile_90'], line_dash="dot", line_color="orange", annotation_text="90th %ile")
-    fig.update_layout(
-        title=f"Lineup {selected_sim_lineup} Score Distribution",
-        xaxis_title="Score",
-        yaxis_title="Frequency"
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Player statistics
-    st.subheader("Player Simulation Stats")
-    player_stats_df = pd.DataFrame(result['player_stats'])
-    st.dataframe(player_stats_df, use_container_width=True)
+    st.header("🔟 Monte Carlo Simulation")
+    c1, c2 = st.columns(2)
+    n_sims   = c1.slider("Simulations", 1000, 20000, 10000, 1000)
+    var_pct  = c2.slider("Variance %", 5, 50, 20) / 100
+    field_sz = st.number_input("Field Size", 10, 10000, 100)
+    if st.button("▶️ Run Simulation", type="primary"):
+        with st.spinner("Simulating…"):
+            sim = MonteCarloSimulator(variance_pct=var_pct)
+            results = sim.simulate_lineups(st.session_state.generated_lineups,
+                                           num_simulations=n_sims, field_size=field_sz)
+            st.session_state.simulation_results = results
+            st.success("✅ Done!")
+    if st.session_state.simulation_results:
+        results = st.session_state.simulation_results
+        rows = [{"Lineup": r["lineup_idx"]+1, "Mean": f"{r['mean_score']:.2f}",
+                 "Std": f"{r['std_score']:.2f}", "P10": f"{r['percentile_10']:.2f}",
+                 "P90": f"{r['percentile_90']:.2f}", "Win%": f"{r['win_probability']:.2%}",
+                 "Top1%": f"{r['top1_probability']:.2%}"} for r in results]
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        sel = st.selectbox("View Distribution", [r["lineup_idx"]+1 for r in results])
+        res = results[sel-1]
+        fig = go.Figure()
+        fig.add_trace(go.Histogram(x=res["simulated_scores"], nbinsx=50))
+        fig.add_vline(x=res["mean_score"], line_dash="dash", line_color="red", annotation_text="Mean")
+        fig.add_vline(x=res["percentile_10"], line_dash="dot", line_color="orange", annotation_text="P10")
+        fig.add_vline(x=res["percentile_90"], line_dash="dot", line_color="green", annotation_text="P90")
+        fig.update_layout(title=f"Lineup {sel} Distribution", xaxis_title="Score", yaxis_title="Freq")
+        st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(pd.DataFrame(res["player_stats"]), use_container_width=True)
 
 
 def main():
-    """Main application entry point"""
     initialize_session_state()
-    render_header()
-    
-    # Sidebar
+    st.title("⚡ DFS Optimizer Pro")
+    st.markdown("**DraftKings Golf Optimizer** | MILP · Monte Carlo · Smart Ownership")
+    st.markdown("---")
     with st.sidebar:
-        st.header("Navigation")
-        st.markdown("Follow these steps:")
-        st.markdown("1. Upload player data")
-        st.markdown("2. Select game mode")
-        st.markdown("3. Configure optimization")
-        st.markdown("4. Set exposure controls")
-        st.markdown("5. Add custom rules")
-        st.markdown("6. Generate lineups")
-        st.markdown("7. Analyze results")
-        st.markdown("8. Run simulations")
-        
-        st.markdown("---")
-        st.markdown("**About**")
-        st.markdown("DFS Optimizer Pro uses Mixed Integer Linear Programming (MILP) for deterministic, mathematically optimal lineup generation.")
-    
-    # Main content
+        st.header("Steps")
+        st.markdown("""
+1. Upload DK CSV  
+2. Manage Player Pool  
+3. Select Game Mode  
+4. Set Optimization  
+5. Exposure Controls  
+6. Rules Engine  
+7. Generate Lineups  
+8. Analyze Results  
+9. Monte Carlo  
+        """)
     render_file_upload()
-    
     if st.session_state.validated_data is not None:
+        render_player_pool()
         render_game_mode_selector()
         settings = render_optimization_settings()
         render_exposure_controls()
@@ -786,7 +575,6 @@ def main():
         render_lineup_results()
         render_exposure_analysis()
         render_monte_carlo()
-
 
 if __name__ == "__main__":
     main()
