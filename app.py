@@ -344,20 +344,46 @@ def render_rule_engine():
 
     with st.expander("➕ Create Conditional Rule"):
         trigger = st.selectbox("IF I use…", player_names, key="trig")
-        action  = st.selectbox("THEN…", ["Boost another player's projection", "Dock another player's projection"], key="act")
+        action  = st.selectbox("THEN…", [
+            "Boost another player's projection",
+            "Dock another player's projection",
+            "Force % exposure of another player across lineups",
+        ], key="act")
         target  = st.selectbox("…apply to:", player_names, key="tgt")
-        amount  = st.slider("By % amount", 1, 100, 10, key="cond_amt")
-        label   = st.text_input("Label (optional)", key="cond_note",
-                                placeholder="e.g. Scheffler + Rory stack")
-        if st.button("Save Conditional Rule"):
-            direction = "boost" if "Boost" in action else "dock"
-            st.session_state.custom_rules.append({
-                "trigger": trigger, "target": target,
-                "direction": direction, "amount": amount,
-                "label": label or f"If {trigger} → {direction} {target} {amount}%"
-            })
-            st.success("Rule saved!")
-            st.rerun()
+
+        if action == "Force % exposure of another player across lineups":
+            amount = st.slider(
+                "Use target player in this % of lineups where trigger is used",
+                1, 100, 50, key="cond_amt",
+                help="e.g. 75 means: whenever trigger appears, target appears in 75% of those lineups"
+            )
+            label = st.text_input("Label (optional)", key="cond_note",
+                                  placeholder="e.g. If Scheffler, use Rory 75% of the time")
+            if st.button("Save Conditional Rule"):
+                st.session_state.custom_rules.append({
+                    "trigger": trigger,
+                    "target": target,
+                    "direction": "exposure",
+                    "amount": amount,
+                    "label": label or f"If {trigger} → use {target} {amount}% of the time"
+                })
+                st.success("Rule saved!")
+                st.rerun()
+        else:
+            amount = st.slider("By % amount", 1, 100, 10, key="cond_amt")
+            label  = st.text_input("Label (optional)", key="cond_note",
+                                   placeholder="e.g. Scheffler + Rory stack")
+            if st.button("Save Conditional Rule"):
+                direction = "boost" if "Boost" in action else "dock"
+                st.session_state.custom_rules.append({
+                    "trigger": trigger,
+                    "target": target,
+                    "direction": direction,
+                    "amount": amount,
+                    "label": label or f"If {trigger} → {direction} {target} {amount}%"
+                })
+                st.success("Rule saved!")
+                st.rerun()
 
     if st.session_state.custom_rules:
         st.markdown("**Active Conditional Rules:**")
@@ -370,16 +396,110 @@ def render_rule_engine():
 
 
 def apply_conditional_rules_to_pool(df, lineup_so_far):
-    """Apply conditional projection rules based on current lineup."""
+    """Apply boost/dock conditional projection rules based on current lineup."""
     df = df.copy()
     lineup_names = {p["Player"] for p in lineup_so_far}
     for rule in st.session_state.custom_rules:
-        if rule["trigger"] in lineup_names:
+        # Only apply projection rules here; exposure rules handled post-generation
+        if rule["direction"] in ("boost", "dock") and rule["trigger"] in lineup_names:
             mask = df["Player"] == rule["target"]
             if mask.any():
-                mult = 1 + rule["amount"] / 100 if rule["direction"] == "boost" else 1 - rule["amount"] / 100
+                mult = (1 + rule["amount"] / 100 if rule["direction"] == "boost"
+                        else 1 - rule["amount"] / 100)
                 df.loc[mask, "Projection"] *= mult
     return df
+
+
+def enforce_exposure_conditional_rules(lineups, player_pool):
+    """
+    Post-generation: for each 'exposure' conditional rule, scan all lineups
+    that contain the trigger player and enforce that the target appears in
+    exactly `amount`% of those lineups.
+
+    Strategy:
+    - Find lineups WITH the trigger but WITHOUT the target.
+    - Calculate how many of those need the target swapped in.
+    - Swap out the lowest-projection non-locked player to fit the target.
+    """
+    if not st.session_state.custom_rules:
+        return lineups
+
+    exposure_rules = [r for r in st.session_state.custom_rules if r["direction"] == "exposure"]
+    if not exposure_rules:
+        return lineups
+
+    lineups = [list(lu) for lu in lineups]  # deep-ish copy
+
+    for rule in exposure_rules:
+        trigger_name = rule["trigger"]
+        target_name  = rule["target"]
+        pct          = rule["amount"] / 100.0
+
+        # Find target player data
+        target_data = player_pool[player_pool["Player"] == target_name]
+        if target_data.empty:
+            continue
+        target_player = target_data.iloc[0].to_dict()
+
+        # Lineups containing the trigger
+        trigger_lineups_idx = [
+            i for i, lu in enumerate(lineups)
+            if any(p["Player"] == trigger_name for p in lu)
+        ]
+        if not trigger_lineups_idx:
+            continue
+
+        needed = max(0, round(len(trigger_lineups_idx) * pct))
+
+        # Of those, which already have the target?
+        already_have = [
+            i for i in trigger_lineups_idx
+            if any(p["Player"] == target_name for p in lineups[i])
+        ]
+
+        if len(already_have) >= needed:
+            continue  # already satisfied
+
+        # Lineups that need the target added
+        missing = [i for i in trigger_lineups_idx if i not in already_have]
+        to_add  = needed - len(already_have)
+        slots   = missing[:to_add]
+
+        for idx in slots:
+            lu = lineups[idx]
+            # Calculate current salary without target
+            current_salary = sum(p["Salary"] for p in lu)
+            cap = 50000
+            salary_room = cap - current_salary + min(p["Salary"] for p in lu)
+
+            # Find the lowest-projection player that isn't the trigger or locked
+            locked_names = set()
+            candidates = [
+                p for p in lu
+                if p["Player"] != trigger_name
+                and p["Player"] not in locked_names
+                and p["Player"] != target_name
+            ]
+            if not candidates:
+                continue
+
+            candidates.sort(key=lambda x: x["Projection"])
+            swap_out = candidates[0]
+
+            new_salary = current_salary - swap_out["Salary"] + target_player.get("Salary", 0)
+            if new_salary <= cap:
+                lineups[idx] = [p for p in lu if p["Player"] != swap_out["Player"]]
+                lineups[idx].append({
+                    "ID":         target_player.get("ID", ""),
+                    "Player":     target_name,
+                    "Position":   target_player.get("Position", "G"),
+                    "Salary":     target_player.get("Salary", 0),
+                    "Projection": target_player.get("Projection", 0),
+                    "Ownership":  target_player.get("Ownership", 0),
+                    "Team":       target_player.get("Team", ""),
+                })
+
+    return lineups
 
 
 def get_active_pool(df):
@@ -444,6 +564,10 @@ def render_optimization_button(settings):
                 if not lineups:
                     st.error("No feasible lineups found. Try relaxing constraints.")
                     return
+
+                # Apply post-generation exposure conditional rules
+                lineups = enforce_exposure_conditional_rules(lineups, adjusted)
+
                 st.session_state.generated_lineups = lineups
                 st.success(f"✅ Generated {len(lineups)} unique lineups!")
             except Exception as e:
@@ -454,43 +578,100 @@ def render_optimization_button(settings):
 def render_lineup_results():
     if not st.session_state.generated_lineups:
         return
+
     st.header("8️⃣ Generated Lineups")
     lineups = st.session_state.generated_lineups
-    sort_by = st.selectbox("Sort by", ["Projection", "Salary", "Avg Ownership", "Combinatorial Ownership"])
+
+    # ── Sort controls ──
+    c1, c2 = st.columns([2, 2])
+    sort_by = c1.selectbox("Sort by", ["Projection", "Salary", "Avg Ownership", "Combinatorial Ownership"])
+    show_lineups = c2.toggle("Show All Lineup Tables", value=True,
+                             help="Toggle off to hide individual lineup tables and save space")
+
+    # Build stats
     stats_list = []
     for i, lu in enumerate(lineups):
         s = OptimizerEngine.calculate_lineup_stats(lu)
         s["lineup_num"] = i + 1
         stats_list.append(s)
+
     key_map = {
-        "Projection": ("total_projection", True),
-        "Salary": ("total_salary", True),
-        "Avg Ownership": ("avg_ownership", False),
-        "Combinatorial Ownership": ("combinatorial_ownership", False),
+        "Projection":             ("total_projection",      True),
+        "Salary":                 ("total_salary",          True),
+        "Avg Ownership":          ("avg_ownership",         False),
+        "Combinatorial Ownership":("combinatorial_ownership",False),
     }
     sk, rev = key_map[sort_by]
     stats_list.sort(key=lambda x: x[sk], reverse=rev)
+
+    # ── Summary table (always visible) ──
+    st.subheader("Summary")
     summary = pd.DataFrame([{
-        "Lineup": s["lineup_num"],
+        "Lineup":     s["lineup_num"],
         "Projection": f"{s['total_projection']:.2f}",
-        "Salary": f"${s['total_salary']:,}",
-        "Avg Own": f"{s['avg_ownership']:.1%}",
-        "Comb Own": f"{s['combinatorial_ownership']:.2%}",
+        "Salary":     f"${s['total_salary']:,}",
+        "Avg Own":    f"{s['avg_ownership']:.1%}",
+        "Comb Own":   f"{s['combinatorial_ownership']:.2%}",
     } for s in stats_list])
     st.dataframe(summary, use_container_width=True)
-    sel_num = st.selectbox("View Lineup Detail", [s["lineup_num"] for s in stats_list])
-    lu = lineups[sel_num - 1]
-    lu_df = pd.DataFrame(lu)
-    disp = [c for c in ["Player", "Position", "Salary", "Projection", "Ownership"] if c in lu_df.columns]
-    st.dataframe(lu_df[disp], use_container_width=True)
+
+    # ── Individual lineup tables (toggleable) ──
+    if show_lineups:
+        st.subheader("Individual Lineups")
+
+        # Respect sort order
+        sorted_lineups = [lineups[s["lineup_num"] - 1] for s in stats_list]
+
+        for rank, (stats, lu) in enumerate(zip(stats_list, sorted_lineups), start=1):
+            lu_num = stats["lineup_num"]
+
+            with st.expander(
+                f"Lineup #{lu_num}  |  "
+                f"Proj: {stats['total_projection']:.1f}  |  "
+                f"Salary: ${stats['total_salary']:,}  |  "
+                f"Avg Own: {stats['avg_ownership']:.1%}",
+                expanded=True
+            ):
+                lu_df = pd.DataFrame(lu)
+                disp_cols = [c for c in ["Player", "Position", "Salary", "Projection", "Ownership"]
+                             if c in lu_df.columns]
+                lu_df_disp = lu_df[disp_cols].copy()
+
+                # Format ownership as %
+                if "Ownership" in lu_df_disp.columns:
+                    lu_df_disp["Ownership"] = lu_df_disp["Ownership"].apply(lambda x: f"{x:.1%}")
+
+                # ── TOTALS ROW ──
+                totals = {}
+                for col in disp_cols:
+                    if col == "Player":
+                        totals[col] = "⚡ TOTAL"
+                    elif col == "Position":
+                        totals[col] = ""
+                    elif col == "Salary":
+                        totals[col] = f"${stats['total_salary']:,}"
+                    elif col == "Projection":
+                        totals[col] = f"{stats['total_projection']:.2f}"
+                    elif col == "Ownership":
+                        totals[col] = f"{stats['avg_ownership']:.1%} avg"
+
+                totals_df = pd.DataFrame([totals])
+                combined = pd.concat([lu_df_disp, totals_df], ignore_index=True)
+
+                st.dataframe(combined, use_container_width=True, hide_index=True)
+
+    # ── Export ──
     st.subheader("Export")
     rows = []
     for i, lu in enumerate(lineups):
         for p in lu:
             rows.append({
-                "Lineup": i + 1, "Player": p["Player"],
-                "Position": p["Position"], "Salary": p["Salary"],
-                "Projection": p["Projection"], "Ownership": f"{p['Ownership']:.1%}",
+                "Lineup":     i + 1,
+                "Player":     p["Player"],
+                "Position":   p["Position"],
+                "Salary":     p["Salary"],
+                "Projection": p["Projection"],
+                "Ownership":  f"{p['Ownership']:.1%}",
             })
     csv = pd.DataFrame(rows).to_csv(index=False)
     st.download_button("⬇️ Download CSV", csv, "dfs_lineups.csv", "text/csv")
