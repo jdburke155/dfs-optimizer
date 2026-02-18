@@ -153,7 +153,6 @@ def render_player_pool():
         display_df,
         use_container_width=True,
         column_config=col_cfg,
-        disabled=[c for c in display_df.columns if c != "Exclude"],
         hide_index=True,
         key="pool_editor"
     )
