@@ -578,10 +578,9 @@ def enforce_exposure_conditional_rules(lineups, player_pool):
 
         for idx in slots:
             lu = lineups[idx]
-            # Calculate current salary without target
-            current_salary = sum(p["Salary"] for p in lu)
+            # Calculate current salary - ensure int conversion
+            current_salary = sum(int(p.get("Salary", 0)) for p in lu)
             cap = 50000
-            salary_room = cap - current_salary + min(p["Salary"] for p in lu)
 
             # Find the lowest-projection player that isn't the trigger or locked
             locked_names = set()
@@ -597,16 +596,20 @@ def enforce_exposure_conditional_rules(lineups, player_pool):
             candidates.sort(key=lambda x: x["Projection"])
             swap_out = candidates[0]
 
-            new_salary = current_salary - swap_out["Salary"] + target_player.get("Salary", 0)
+            # Ensure salaries are integers
+            swap_out_salary = int(swap_out.get("Salary", 0))
+            target_salary = int(target_player.get("Salary", 0))
+            new_salary = current_salary - swap_out_salary + target_salary
+            
             if new_salary <= cap:
                 lineups[idx] = [p for p in lu if p["Player"] != swap_out["Player"]]
                 lineups[idx].append({
-                    "ID":         target_player.get("ID", ""),
+                    "ID":         str(target_player.get("ID", "")),
                     "Player":     target_name,
                     "Position":   target_player.get("Position", "G"),
-                    "Salary":     target_player.get("Salary", 0),
-                    "Projection": target_player.get("Projection", 0),
-                    "Ownership":  target_player.get("Ownership", 0),
+                    "Salary":     target_salary,
+                    "Projection": float(target_player.get("Projection", 0)),
+                    "Ownership":  float(target_player.get("Ownership", 0)),
                     "Team":       target_player.get("Team", ""),
                 })
 
@@ -619,19 +622,32 @@ def validate_and_fix_lineups(lineups, salary_cap=50000, roster_size=6):
     This is a safety check after post-generation modifications.
     """
     valid_lineups = []
-    for lu in lineups:
+    invalid_details = []
+    
+    for i, lu in enumerate(lineups):
         # Check roster size
         if len(lu) != roster_size:
+            invalid_details.append(f"Lineup {i+1}: Wrong roster size ({len(lu)} players)")
             continue
         
-        # Check salary cap
-        total_salary = sum(p.get("Salary", 0) for p in lu)
+        # Check salary cap - ensure all salaries are integers
+        try:
+            total_salary = sum(int(p.get("Salary", 0)) for p in lu)
+        except (ValueError, TypeError):
+            invalid_details.append(f"Lineup {i+1}: Invalid salary data type")
+            continue
+            
         if total_salary > salary_cap:
+            invalid_details.append(f"Lineup {i+1}: Over cap (${total_salary:,})")
             continue
         
         valid_lineups.append(lu)
     
-    return valid_lineups if valid_lineups else lineups[:1]  # Keep at least one
+    # Store invalid details for debugging
+    if invalid_details and hasattr(st, 'session_state'):
+        st.session_state.validation_errors = invalid_details
+    
+    return valid_lineups  # Return empty list if no valid lineups (don't return invalid ones)
 
 
 def get_active_pool(df):
@@ -732,6 +748,16 @@ def render_optimization_button(settings):
                 )
                 after_validation = len(lineups)
                 
+                # Check if we have any valid lineups
+                if not lineups:
+                    st.error("❌ No valid lineups after validation! All lineups violated salary cap or roster constraints.")
+                    if hasattr(st.session_state, 'validation_errors'):
+                        with st.expander("🔍 Validation Errors", expanded=True):
+                            for err in st.session_state.validation_errors[:10]:  # Show first 10
+                                st.write(f"• {err}")
+                    st.info("Try: Increase variance %, reduce conditional rules, or check your player pool data.")
+                    return
+                
                 # Trim to requested count
                 if len(lineups) > requested_count:
                     lineups = lineups[:requested_count]
@@ -822,7 +848,8 @@ def render_lineup_results():
                 f"Lineup #{lu_num}  |  "
                 f"Proj: {stats['total_projection']:.1f}  |  "
                 f"Salary: ${stats['total_salary']:,}  |  "
-                f"Comb Own: {stats['combinatorial_ownership']:.2%}",
+                f"Comb Own: {stats['combinatorial_ownership']:.2%}"
+                + (" ⚠️ OVER CAP" if stats['total_salary'] > 50000 else ""),
                 expanded=True
             ):
                 lu_df = pd.DataFrame(lu)
