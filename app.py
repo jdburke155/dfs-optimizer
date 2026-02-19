@@ -668,6 +668,13 @@ def render_optimization_button(settings):
                 adjusted = apply_conditional_rules_to_pool(adjusted, [])
                 game_mode = GameModes.get_mode(st.session_state.game_mode)
                 locked = st.session_state.exposure_manager.get_locked_players()
+                
+                # Generate extra lineups to account for post-filtering
+                # If we have aggressive filters, we'll lose some lineups
+                requested_count = settings["num_lineups"]
+                generation_multiplier = 1.5  # Generate 50% more to account for filtering
+                initial_generation_count = min(150, int(requested_count * generation_multiplier))
+                
                 optimizer = OptimizerEngine(
                     player_pool=adjusted,
                     game_mode=game_mode,
@@ -678,14 +685,14 @@ def render_optimization_button(settings):
                 )
                 if settings["mode"] == "Cash Game":
                     lineups = optimizer.optimize_cash(
-                        num_lineups=settings["num_lineups"],
+                        num_lineups=initial_generation_count,
                         min_salary=settings["min_salary"],
                         locked_players=locked,
                         variance_pct=settings["variance_pct"],
                     )
                 else:
                     lineups = optimizer.optimize_tournament(
-                        num_lineups=settings["num_lineups"],
+                        num_lineups=initial_generation_count,
                         projection_weight=settings["projection_weight"],
                         ownership_weight=settings["ownership_weight"],
                         ownership_penalty_threshold=settings["ownership_penalty_threshold"],
@@ -696,14 +703,18 @@ def render_optimization_button(settings):
                 if not lineups:
                     st.error("No feasible lineups found. Try relaxing constraints.")
                     return
+                
+                initial_count = len(lineups)
 
                 # Apply post-generation exposure conditional rules
                 lineups = enforce_exposure_conditional_rules(lineups, adjusted)
+                after_exposure = len(lineups)
                 
                 # Enforce global max ownership cap
                 global_max = settings["global_max_ownership"]
                 if global_max < 1.0:
                     lineups = enforce_global_max_ownership(lineups, global_max)
+                after_global_max = len(lineups)
                 
                 # Enforce min/max combinatorial ownership
                 lineups = enforce_combinatorial_ownership_bounds(
@@ -711,20 +722,46 @@ def render_optimization_button(settings):
                     settings["min_combinatorial_own"],
                     settings["max_combinatorial_own"]
                 )
+                after_comb_own = len(lineups)
                 
                 # Validate all lineups for salary cap and roster size violations
-                original_count = len(lineups)
                 lineups = validate_and_fix_lineups(
                     lineups, 
                     salary_cap=game_mode.salary_cap,
                     roster_size=game_mode.roster_size
                 )
+                after_validation = len(lineups)
+                
+                # Trim to requested count
+                if len(lineups) > requested_count:
+                    lineups = lineups[:requested_count]
 
                 st.session_state.generated_lineups = lineups
                 
-                removed_count = original_count - len(lineups)
-                if removed_count > 0:
-                    st.warning(f"⚠️ {removed_count} lineup(s) removed due to salary cap or roster size violations after applying rules.")
+                # Show diagnostic info if significant filtering occurred
+                total_filtered = initial_count - after_validation
+                if total_filtered > 0:
+                    with st.expander("📊 Lineup Generation Details", expanded=False):
+                        st.write(f"**Initial generation:** {initial_count} lineups")
+                        if after_exposure < initial_count:
+                            st.write(f"**After exposure rules:** {after_exposure} (-{initial_count - after_exposure})")
+                        if after_global_max < after_exposure:
+                            st.write(f"**After global max ownership:** {after_global_max} (-{after_exposure - after_global_max})")
+                        if after_comb_own < after_global_max:
+                            st.write(f"**After combinatorial ownership filter:** {after_comb_own} (-{after_global_max - after_comb_own})")
+                        if after_validation < after_comb_own:
+                            st.write(f"**After validation (salary/roster):** {after_validation} (-{after_comb_own - after_validation})")
+                        st.write(f"**Final count:** {len(lineups)} lineups")
+                        
+                        if len(lineups) < requested_count:
+                            st.warning(f"⚠️ Requested {requested_count} but only {len(lineups)} valid lineups could be generated. Consider:")
+                            st.markdown("""
+                            - Increasing variance %
+                            - Relaxing global max ownership %
+                            - Widening combinatorial ownership bounds
+                            - Reducing minimum unique players
+                            - Removing some structural rules
+                            """)
                 
                 st.success(f"✅ Generated {len(lineups)} valid unique lineups!")
             except Exception as e:
