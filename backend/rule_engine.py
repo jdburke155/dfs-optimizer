@@ -26,6 +26,14 @@ class Rule:
             if len(available) == 0:
                 return False, f"No players available from: {', '.join(player_names)}"
         
+        elif self.rule_type == "pick_x_of_group":
+            player_names = self.params.get("players", [])
+            min_count = self.params.get("min_count", 1)
+            max_count = self.params.get("max_count", 6)
+            available = player_pool[player_pool['Player'].isin(player_names)]
+            if len(available) < min_count:
+                return False, f"Not enough players from group (need at least {min_count}, have {len(available)})"
+        
         elif self.rule_type == "max_from_team":
             team = self.params.get("team", "")
             max_count = self.params.get("max_count", 0)
@@ -109,6 +117,16 @@ class RuleEngine:
                     # At least one of these players must be selected
                     constraint = sum(player_vars[pid] for pid in matching_ids if pid in player_vars) >= 1
                     constraints.append(constraint)
+            
+            elif rule.rule_type == "pick_x_of_group":
+                player_names = rule.params.get("players", [])
+                min_count = rule.params.get("min_count", 1)
+                max_count = rule.params.get("max_count", 6)
+                matching_ids = player_pool[player_pool['Player'].isin(player_names)]['ID'].tolist()
+                if matching_ids:
+                    player_sum = sum(player_vars[pid] for pid in matching_ids if pid in player_vars)
+                    constraints.append(player_sum >= min_count)
+                    constraints.append(player_sum <= max_count)
             
             elif rule.rule_type == "max_from_team":
                 team = rule.params.get("team", "")
