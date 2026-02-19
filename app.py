@@ -228,6 +228,28 @@ def render_optimization_settings():
         options=[1, 2, 3, 4, 5, 6], index=0,
         help="Each lineup must differ from prior lineups by at least this many players"
     )
+    
+    # Global max ownership cap
+    global_max_own = c1.slider(
+        "Global Max Ownership % (applies to all players)",
+        0, 100, 100,
+        help="No player can appear in more than this % of lineups (overrides individual settings)"
+    )
+    
+    # Min/Max Combinatorial Ownership
+    st.markdown("**Combinatorial Ownership Bounds**")
+    ccol1, ccol2 = st.columns(2)
+    min_comb_own = ccol1.slider(
+        "Min Combinatorial Ownership %",
+        0, 100, 0,
+        help="Lineups below this combined ownership % will be removed"
+    )
+    max_comb_own = ccol2.slider(
+        "Max Combinatorial Ownership %",
+        0, 100, 100,
+        help="Lineups above this combined ownership % will be removed"
+    )
+    
     variance_pct = c2.slider("Variance %", 0.0, 50.0, 15.0 if opt_mode == "Tournament" else 0.0, 1.0) / 100
     if opt_mode == "Tournament":
         proj_weight = c2.slider("Projection Weight %", 0, 100, 70) / 100
@@ -244,6 +266,9 @@ def render_optimization_settings():
         "ownership_weight": own_weight,
         "ownership_penalty_threshold": own_penalty,
         "unique_players": unique_players,
+        "global_max_ownership": global_max_own / 100,
+        "min_combinatorial_own": min_comb_own / 100,
+        "max_combinatorial_own": max_comb_own / 100,
     }
 
 
@@ -297,8 +322,11 @@ def render_rule_engine():
             st.rerun()
 
     rule_type = st.selectbox("Add Structural Rule", [
-        "At least one of (players)", "Max players from team",
-        "Min salary threshold", "Max salary on expensive players",
+        "At least one of (players)",
+        "Pick X of group (1-6 players from list)",
+        "Max players from team",
+        "Min salary threshold",
+        "Max salary on expensive players",
     ])
     if rule_type == "At least one of (players)":
         picks = st.multiselect("Players", player_names, key="r1")
@@ -307,6 +335,19 @@ def render_rule_engine():
                 rule_type="at_least_one_of",
                 description=f"At least one of: {', '.join(picks)}",
                 params={"players": picks}
+            ))
+            st.rerun()
+    
+    elif rule_type == "Pick X of group (1-6 players from list)":
+        picks = st.multiselect("Select player group", player_names, key="r_group")
+        c1, c2 = st.columns(2)
+        min_count = c1.number_input("Minimum from group", 0, 6, 1, key="r_group_min")
+        max_count = c2.number_input("Maximum from group", 0, 6, 6, key="r_group_max")
+        if st.button("Add", key="add_r_group") and picks and min_count <= max_count:
+            st.session_state.rule_engine.add_rule(Rule(
+                rule_type="pick_x_of_group",
+                description=f"Pick {min_count}-{max_count} of: {', '.join(picks)}",
+                params={"players": picks, "min_count": min_count, "max_count": max_count}
             ))
             st.rerun()
     elif rule_type == "Max players from team":
@@ -413,6 +454,71 @@ def apply_conditional_rules_to_pool(df, lineup_so_far):
                         else 1 - rule["amount"] / 100)
                 df.loc[mask, "Projection"] *= mult
     return df
+
+
+def enforce_global_max_ownership(lineups, max_ownership_pct):
+    """
+    Remove lineups to enforce that no player appears in more than max_ownership_pct of lineups.
+    """
+    if max_ownership_pct >= 1.0:
+        return lineups
+    
+    max_count = int(len(lineups) * max_ownership_pct)
+    if max_count <= 0:
+        return lineups[:1]  # Keep at least one
+    
+    # Count player appearances
+    player_counts = {}
+    for lu in lineups:
+        for p in lu:
+            name = p["Player"]
+            player_counts[name] = player_counts.get(name, 0) + 1
+    
+    # Find players over the limit
+    over_limit = {name: count for name, count in player_counts.items() if count > max_count}
+    
+    if not over_limit:
+        return lineups
+    
+    # Remove lineups to bring players under the limit
+    # Strategy: sort lineups by projection (ascending), remove worst lineups containing over-limit players
+    lineups_with_proj = [
+        (i, lu, sum(p["Projection"] for p in lu))
+        for i, lu in enumerate(lineups)
+    ]
+    lineups_with_proj.sort(key=lambda x: x[2])  # Sort by projection ascending
+    
+    to_remove = set()
+    for name, count in over_limit.items():
+        need_to_remove = count - max_count
+        removed = 0
+        for i, lu, proj in lineups_with_proj:
+            if i in to_remove:
+                continue
+            if any(p["Player"] == name for p in lu):
+                to_remove.add(i)
+                removed += 1
+                if removed >= need_to_remove:
+                    break
+    
+    kept_lineups = [lu for i, lu in enumerate(lineups) if i not in to_remove]
+    return kept_lineups if kept_lineups else lineups[:1]
+
+
+def enforce_combinatorial_ownership_bounds(lineups, min_own, max_own):
+    """
+    Filter lineups based on combinatorial ownership bounds.
+    """
+    if min_own <= 0 and max_own >= 1:
+        return lineups
+    
+    filtered = []
+    for lu in lineups:
+        comb_own = OptimizerEngine.calculate_combinatorial_ownership(lu)
+        if min_own <= comb_own <= max_own:
+            filtered.append(lu)
+    
+    return filtered if filtered else lineups  # Return all if none match
 
 
 def enforce_exposure_conditional_rules(lineups, player_pool):
@@ -572,6 +678,18 @@ def render_optimization_button(settings):
 
                 # Apply post-generation exposure conditional rules
                 lineups = enforce_exposure_conditional_rules(lineups, adjusted)
+                
+                # Enforce global max ownership cap
+                global_max = settings["global_max_ownership"]
+                if global_max < 1.0:
+                    lineups = enforce_global_max_ownership(lineups, global_max)
+                
+                # Enforce min/max combinatorial ownership
+                lineups = enforce_combinatorial_ownership_bounds(
+                    lineups, 
+                    settings["min_combinatorial_own"],
+                    settings["max_combinatorial_own"]
+                )
 
                 st.session_state.generated_lineups = lineups
                 st.success(f"✅ Generated {len(lineups)} unique lineups!")
@@ -615,7 +733,6 @@ def render_lineup_results():
         "Lineup":     s["lineup_num"],
         "Projection": f"{s['total_projection']:.2f}",
         "Salary":     f"${s['total_salary']:,}",
-        "Avg Own":    f"{s['avg_ownership']:.1%}",
         "Comb Own":   f"{s['combinatorial_ownership']:.2%}",
     } for s in stats_list])
     st.dataframe(summary, use_container_width=True)
@@ -634,7 +751,7 @@ def render_lineup_results():
                 f"Lineup #{lu_num}  |  "
                 f"Proj: {stats['total_projection']:.1f}  |  "
                 f"Salary: ${stats['total_salary']:,}  |  "
-                f"Avg Own: {stats['avg_ownership']:.1%}",
+                f"Comb Own: {stats['combinatorial_ownership']:.2%}",
                 expanded=True
             ):
                 lu_df = pd.DataFrame(lu)
@@ -658,7 +775,7 @@ def render_lineup_results():
                     elif col == "Projection":
                         totals[col] = f"{stats['total_projection']:.2f}"
                     elif col == "Ownership":
-                        totals[col] = f"{stats['avg_ownership']:.1%} avg"
+                        totals[col] = f"{stats['combinatorial_ownership']:.2%}"
 
                 totals_df = pd.DataFrame([totals])
                 combined = pd.concat([lu_df_disp, totals_df], ignore_index=True)
