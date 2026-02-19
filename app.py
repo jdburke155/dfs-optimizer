@@ -613,6 +613,27 @@ def enforce_exposure_conditional_rules(lineups, player_pool):
     return lineups
 
 
+def validate_and_fix_lineups(lineups, salary_cap=50000, roster_size=6):
+    """
+    Validate all lineups and remove any that violate constraints.
+    This is a safety check after post-generation modifications.
+    """
+    valid_lineups = []
+    for lu in lineups:
+        # Check roster size
+        if len(lu) != roster_size:
+            continue
+        
+        # Check salary cap
+        total_salary = sum(p.get("Salary", 0) for p in lu)
+        if total_salary > salary_cap:
+            continue
+        
+        valid_lineups.append(lu)
+    
+    return valid_lineups if valid_lineups else lineups[:1]  # Keep at least one
+
+
 def get_active_pool(df):
     excluded = st.session_state.excluded_players
     if excluded:
@@ -690,9 +711,22 @@ def render_optimization_button(settings):
                     settings["min_combinatorial_own"],
                     settings["max_combinatorial_own"]
                 )
+                
+                # Validate all lineups for salary cap and roster size violations
+                original_count = len(lineups)
+                lineups = validate_and_fix_lineups(
+                    lineups, 
+                    salary_cap=game_mode.salary_cap,
+                    roster_size=game_mode.roster_size
+                )
 
                 st.session_state.generated_lineups = lineups
-                st.success(f"✅ Generated {len(lineups)} unique lineups!")
+                
+                removed_count = original_count - len(lineups)
+                if removed_count > 0:
+                    st.warning(f"⚠️ {removed_count} lineup(s) removed due to salary cap or roster size violations after applying rules.")
+                
+                st.success(f"✅ Generated {len(lineups)} valid unique lineups!")
             except Exception as e:
                 st.error(f"❌ Error: {e}")
                 import traceback; st.code(traceback.format_exc())
