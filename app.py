@@ -27,6 +27,7 @@ st.set_page_config(
 )
 
 DK_COLUMN_MAP = {
+    # Classic format columns
     "Golfer":          "Player",
     "DK Salary":       "Salary",
     "DK Points":       "Projection",
@@ -36,6 +37,13 @@ DK_COLUMN_MAP = {
     "Make Cut Odds":   "MakeCut",
     "DK Value":        "Value",
     "Volatility":      "Volatility",
+    # Showdown format columns
+    "Points":          "Projection",  # Showdown uses "Points" not "DK Points"
+    "Tee Time":        "TeeTime",
+    # Common
+    "Salary":          "Salary",      # Showdown already has "Salary" not "DK Salary"
+    "Ownership":       "Ownership",   # Showdown already has "Ownership"
+    "Value":           "Value",       # Showdown already has "Value"
     "id":              "ID",
 }
 
@@ -43,6 +51,10 @@ def normalize_dk_csv(df):
     df = df.copy()
     df.columns = [c.strip().lstrip("\ufeff").strip('"') for c in df.columns]
     df = df.rename(columns={k: v for k, v in DK_COLUMN_MAP.items() if k in df.columns})
+    
+    # Deduplicate if both "Points" and "DK Points" mapped to "Projection"
+    # (shouldn't happen but just in case)
+    
     if "Position" not in df.columns:
         df["Position"] = "G"
     if "Salary" in df.columns:
@@ -90,9 +102,9 @@ def initialize_session_state():
 def render_file_upload():
     st.header("1️⃣ Data Import")
     uploaded_file = st.file_uploader(
-        "Upload DraftKings CSV (native DK export or custom)",
+        "Upload DraftKings CSV (Classic or Showdown format)",
         type=["csv"],
-        help="Supports native DraftKings PGA export format automatically"
+        help="Supports DraftKings Classic (full tournament) and Showdown (single round) formats"
     )
     if uploaded_file:
         try:
