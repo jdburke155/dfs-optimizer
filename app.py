@@ -93,6 +93,7 @@ def initialize_session_state():
         "player_min_own": {},
         "player_max_own": {},
         "custom_rules": [],
+        "current_settings": {},  # Stores optimization settings for persistence
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -232,38 +233,91 @@ def render_game_mode_selector():
 def render_optimization_settings():
     st.header("4️⃣ Optimization Settings")
     
-    opt_mode = st.radio("Mode", ["Cash Game", "Tournament"], index=1)
+    # Load previous settings if available
+    prev = st.session_state.get("current_settings", {})
+    
+    # Mode selection
+    default_mode = prev.get("mode", "Tournament")
+    mode_index = 0 if default_mode == "Cash Game" else 1
+    opt_mode = st.radio("Mode", ["Cash Game", "Tournament"], index=mode_index)
     
     c1, c2 = st.columns(2)
     
+    # Get default based on mode
     default_lineups = 20 if opt_mode == "Tournament" else 3
-    num_lineups = c1.slider("Number of Lineups", min_value=1, max_value=150, value=default_lineups)
-    min_salary = c1.number_input("Min Salary Floor", min_value=0, max_value=50000, value=0, step=1000)
+    num_lineups = c1.slider(
+        "Number of Lineups", 
+        min_value=1, 
+        max_value=150, 
+        value=prev.get("num_lineups", default_lineups)
+    )
+    
+    min_salary = c1.number_input(
+        "Min Salary Floor", 
+        min_value=0, 
+        max_value=50000, 
+        value=prev.get("min_salary_input", 0), 
+        step=1000
+    )
+    
     unique_players = c1.selectbox(
         "Minimum Unique Players Per Lineup",
         options=[1, 2, 3, 4, 5, 6], 
-        index=0,
+        index=prev.get("unique_players", 1) - 1,
         help="Each lineup must differ from prior lineups by at least this many players"
     )
     
     global_max_own = c1.slider(
         "Global Max Ownership % (applies to all players)",
-        min_value=0, max_value=100, value=100,
+        min_value=0, 
+        max_value=100, 
+        value=prev.get("global_max_own_pct", 100),
         help="No player can appear in more than this % of lineups (overrides individual settings)"
     )
     
     st.markdown("**Combinatorial Ownership Bounds**")
     ccol1, ccol2 = st.columns(2)
-    min_comb_own = ccol1.slider("Min Combinatorial Ownership %", min_value=0, max_value=100, value=0)
-    max_comb_own = ccol2.slider("Max Combinatorial Ownership %", min_value=0, max_value=250, value=100)
+    min_comb_own = ccol1.slider(
+        "Min Combinatorial Ownership %", 
+        min_value=0, 
+        max_value=100, 
+        value=prev.get("min_comb_own_pct", 0)
+    )
+    max_comb_own = ccol2.slider(
+        "Max Combinatorial Ownership %", 
+        min_value=0, 
+        max_value=250, 
+        value=prev.get("max_comb_own_pct", 100)
+    )
     
     default_var = 15.0 if opt_mode == "Tournament" else 0.0
-    variance_pct = c2.slider("Variance %", min_value=0.0, max_value=50.0, value=default_var, step=1.0) / 100
+    variance_pct = c2.slider(
+        "Variance %", 
+        min_value=0.0, 
+        max_value=50.0, 
+        value=prev.get("variance_pct_input", default_var), 
+        step=1.0
+    ) / 100
     
     if opt_mode == "Tournament":
-        proj_weight = c2.slider("Projection Weight %", min_value=0, max_value=100, value=70) / 100
-        own_weight = c2.slider("Ownership Leverage %", min_value=0, max_value=100, value=30) / 100
-        own_penalty = c2.slider("High-Own Penalty Threshold %", min_value=0, max_value=50, value=15) / 100
+        proj_weight = c2.slider(
+            "Projection Weight %", 
+            min_value=0, 
+            max_value=100, 
+            value=prev.get("proj_weight_pct", 70)
+        ) / 100
+        own_weight = c2.slider(
+            "Ownership Leverage %", 
+            min_value=0, 
+            max_value=100, 
+            value=prev.get("own_weight_pct", 30)
+        ) / 100
+        own_penalty = c2.slider(
+            "High-Own Penalty Threshold %", 
+            min_value=0, 
+            max_value=50, 
+            value=prev.get("own_penalty_pct", 15)
+        ) / 100
     else:
         proj_weight, own_weight, own_penalty = 1.0, 0.0, 1.0
     
@@ -271,7 +325,9 @@ def render_optimization_settings():
         "mode": opt_mode,
         "num_lineups": num_lineups,
         "min_salary": min_salary if min_salary > 0 else None,
+        "min_salary_input": min_salary,
         "variance_pct": variance_pct,
+        "variance_pct_input": variance_pct * 100,
         "projection_weight": proj_weight,
         "ownership_weight": own_weight,
         "ownership_penalty_threshold": own_penalty,
@@ -279,7 +335,17 @@ def render_optimization_settings():
         "global_max_ownership": global_max_own / 100,
         "min_combinatorial_own": min_comb_own / 100,
         "max_combinatorial_own": max_comb_own / 100,
+        # Store percentage versions for persistence
+        "global_max_own_pct": global_max_own,
+        "min_comb_own_pct": min_comb_own,
+        "max_comb_own_pct": max_comb_own,
+        "proj_weight_pct": int(proj_weight * 100),
+        "own_weight_pct": int(own_weight * 100),
+        "own_penalty_pct": int(own_penalty * 100),
     }
+    
+    # Save settings for persistence
+    st.session_state.current_settings = settings
     
     return settings
 
@@ -1021,6 +1087,26 @@ def main():
 
     st.title("⚡ DFS Optimizer Pro")
     st.markdown("**DraftKings Golf Optimizer** | MILP · Monte Carlo · Smart Ownership")
+    
+    # Reset Settings Button
+    with st.expander("🔄 Reset Settings", expanded=False):
+        st.markdown("**Reset optimization settings to defaults** (keeps uploaded player data)")
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            if st.button("🔄 Reset to Defaults", type="secondary"):
+                # Clear settings but keep player data
+                st.session_state.current_settings = {}
+                st.session_state.excluded_players = set()
+                st.session_state.player_min_own = {}
+                st.session_state.player_max_own = {}
+                st.session_state.custom_rules = []
+                st.session_state.exposure_manager = ExposureManager()
+                st.session_state.rule_engine = RuleEngine()
+                st.session_state.generated_lineups = None
+                st.session_state.simulation_results = None
+                st.success("✅ Settings reset to defaults!")
+                st.rerun()
+    
     st.markdown("---")
     with st.sidebar:
         st.header("Steps")
