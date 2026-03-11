@@ -237,8 +237,14 @@ def render_optimization_settings():
     # Load previous settings if available
     prev = st.session_state.get("current_settings", {})
     
+    # Radio button uses key to maintain state, not index
     opt_mode = st.radio("Mode", ["Cash Game", "Tournament"], 
-                        index=0 if prev.get("mode") == "Cash Game" else 1)
+                        key="opt_mode_radio")
+    
+    # If we have previous settings and this is first render, set the mode
+    if prev and "mode" in prev and "opt_mode_radio" not in st.session_state:
+        st.session_state.opt_mode_radio = prev.get("mode", "Tournament")
+    
     c1, c2 = st.columns(2)
     
     default_lineups = 20 if opt_mode == "Tournament" else 3
@@ -249,7 +255,7 @@ def render_optimization_settings():
     unique_players = c1.selectbox(
         "Minimum Unique Players Per Lineup",
         options=[1, 2, 3, 4, 5, 6], 
-        index=prev.get("unique_players", 1) - 1,
+        index=max(0, prev.get("unique_players", 1) - 1),
         help="Each lineup must differ from prior lineups by at least this many players"
     )
     
