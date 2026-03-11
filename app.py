@@ -237,10 +237,17 @@ def render_optimization_settings():
     # Load previous settings if available
     prev = st.session_state.get("current_settings", {})
     
+    # Add mode radio button
+    default_mode = prev.get("mode", "Tournament")
+    mode_options = ["Cash Game", "Tournament"]
+    default_index = mode_options.index(default_mode) if default_mode in mode_options else 1
+    opt_mode = st.radio("Mode", mode_options, index=default_index)
+    
     c1, c2 = st.columns(2)
     
+    default_lineups = 20 if opt_mode == "Tournament" else 3
     num_lineups = c1.slider("Number of Lineups", 1, 150, 
-                            prev.get("num_lineups", 20))
+                            prev.get("num_lineups", default_lineups))
     min_salary = c1.number_input("Min Salary Floor", 0, 50000, 
                                   prev.get("min_salary_input", 0), 1000)
     unique_players = c1.selectbox(
@@ -271,18 +278,22 @@ def render_optimization_settings():
         help="Lineups above this combined ownership % will be removed (can exceed 100% for high-ownership lineups)"
     )
     
+    default_var = 15.0 if opt_mode == "Tournament" else 0.0
     variance_pct = c2.slider("Variance %", 0.0, 50.0, 
-                             prev.get("variance_pct_input", 15.0), 1.0) / 100
+                             prev.get("variance_pct_input", default_var), 1.0) / 100
     
-    proj_weight = c2.slider("Projection Weight %", 0, 100, 
-                            prev.get("projection_weight_pct", 70)) / 100
-    own_weight  = c2.slider("Ownership Leverage %", 0, 100, 
-                            prev.get("ownership_weight_pct", 30)) / 100
-    own_penalty = c2.slider("High-Own Penalty Threshold %", 0, 50, 
-                            prev.get("ownership_penalty_threshold_pct", 15)) / 100
+    if opt_mode == "Tournament":
+        proj_weight = c2.slider("Projection Weight %", 0, 100, 
+                                prev.get("projection_weight_pct", 70)) / 100
+        own_weight  = c2.slider("Ownership Leverage %", 0, 100, 
+                                prev.get("ownership_weight_pct", 30)) / 100
+        own_penalty = c2.slider("High-Own Penalty Threshold %", 0, 50, 
+                                prev.get("ownership_penalty_threshold_pct", 15)) / 100
+    else:
+        proj_weight, own_weight, own_penalty = 1.0, 0.0, 1.0
     
     settings = {
-        "mode": "Tournament",  # Always use tournament mode, templates control strategy
+        "mode": opt_mode,
         "num_lineups": num_lineups,
         "min_salary": min_salary if min_salary > 0 else None,
         "min_salary_input": min_salary,
