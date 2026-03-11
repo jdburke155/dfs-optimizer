@@ -237,19 +237,10 @@ def render_optimization_settings():
     # Load previous settings if available
     prev = st.session_state.get("current_settings", {})
     
-    # Radio button uses key to maintain state, not index
-    opt_mode = st.radio("Mode", ["Cash Game", "Tournament"], 
-                        key="opt_mode_radio")
-    
-    # If we have previous settings and this is first render, set the mode
-    if prev and "mode" in prev and "opt_mode_radio" not in st.session_state:
-        st.session_state.opt_mode_radio = prev.get("mode", "Tournament")
-    
     c1, c2 = st.columns(2)
     
-    default_lineups = 20 if opt_mode == "Tournament" else 3
     num_lineups = c1.slider("Number of Lineups", 1, 150, 
-                            prev.get("num_lineups", default_lineups))
+                            prev.get("num_lineups", 20))
     min_salary = c1.number_input("Min Salary Floor", 0, 50000, 
                                   prev.get("min_salary_input", 0), 1000)
     unique_players = c1.selectbox(
@@ -280,29 +271,29 @@ def render_optimization_settings():
         help="Lineups above this combined ownership % will be removed (can exceed 100% for high-ownership lineups)"
     )
     
-    default_var = 15.0 if opt_mode == "Tournament" else 0.0
     variance_pct = c2.slider("Variance %", 0.0, 50.0, 
-                             prev.get("variance_pct_input", default_var), 1.0) / 100
-    if opt_mode == "Tournament":
-        proj_weight = c2.slider("Projection Weight %", 0, 100, 
-                                int(prev.get("projection_weight", 0.7) * 100)) / 100
-        own_weight  = c2.slider("Ownership Leverage %", 0, 100, 
-                                int(prev.get("ownership_weight", 0.3) * 100)) / 100
-        own_penalty = c2.slider("High-Own Penalty Threshold %", 0, 50, 
-                                int(prev.get("ownership_penalty_threshold", 0.15) * 100)) / 100
-    else:
-        proj_weight, own_weight, own_penalty = 1.0, 0.0, 1.0
+                             prev.get("variance_pct_input", 15.0), 1.0) / 100
+    
+    proj_weight = c2.slider("Projection Weight %", 0, 100, 
+                            prev.get("projection_weight_pct", 70)) / 100
+    own_weight  = c2.slider("Ownership Leverage %", 0, 100, 
+                            prev.get("ownership_weight_pct", 30)) / 100
+    own_penalty = c2.slider("High-Own Penalty Threshold %", 0, 50, 
+                            prev.get("ownership_penalty_threshold_pct", 15)) / 100
     
     settings = {
-        "mode": opt_mode,
+        "mode": "Tournament",  # Always use tournament mode, templates control strategy
         "num_lineups": num_lineups,
         "min_salary": min_salary if min_salary > 0 else None,
         "min_salary_input": min_salary,
         "variance_pct": variance_pct,
         "variance_pct_input": variance_pct * 100,
         "projection_weight": proj_weight,
+        "projection_weight_pct": int(proj_weight * 100),
         "ownership_weight": own_weight,
+        "ownership_weight_pct": int(own_weight * 100),
         "ownership_penalty_threshold": own_penalty,
+        "ownership_penalty_threshold_pct": int(own_penalty * 100),
         "unique_players": unique_players,
         "global_max_ownership": global_max_own / 100,
         "global_max_ownership_pct": global_max_own,
@@ -745,23 +736,17 @@ def render_optimization_button(settings):
                     player_min_own=st.session_state.player_min_own,
                     player_max_own=st.session_state.player_max_own,
                 )
-                if settings["mode"] == "Cash Game":
-                    lineups = optimizer.optimize_cash(
-                        num_lineups=initial_generation_count,
-                        min_salary=settings["min_salary"],
-                        locked_players=locked,
-                        variance_pct=settings["variance_pct"],
-                    )
-                else:
-                    lineups = optimizer.optimize_tournament(
-                        num_lineups=initial_generation_count,
-                        projection_weight=settings["projection_weight"],
-                        ownership_weight=settings["ownership_weight"],
-                        ownership_penalty_threshold=settings["ownership_penalty_threshold"],
-                        min_salary=settings["min_salary"],
-                        locked_players=locked,
-                        variance_pct=settings["variance_pct"],
-                    )
+                
+                # Always use tournament mode
+                lineups = optimizer.optimize_tournament(
+                    num_lineups=initial_generation_count,
+                    projection_weight=settings["projection_weight"],
+                    ownership_weight=settings["ownership_weight"],
+                    ownership_penalty_threshold=settings["ownership_penalty_threshold"],
+                    min_salary=settings["min_salary"],
+                    locked_players=locked,
+                    variance_pct=settings["variance_pct"],
+                )
                 if not lineups:
                     st.error("No feasible lineups found. Try relaxing constraints.")
                     return
