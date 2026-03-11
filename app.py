@@ -94,6 +94,7 @@ def initialize_session_state():
         "player_max_own": {},
         "custom_rules": [],
         "current_settings": {},  # Stores optimization settings for persistence
+        "uploaded_filename": None,  # Track uploaded file name
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -102,11 +103,33 @@ def initialize_session_state():
 
 def render_file_upload():
     st.header("1️⃣ Data Import")
+    
+    # Show currently loaded data if it exists
+    if st.session_state.validated_data is not None and st.session_state.uploaded_filename:
+        st.success(f"✅ Data loaded: **{st.session_state.uploaded_filename}**")
+        validator = DataValidator()
+        stats = {
+            'total_players': len(st.session_state.validated_data),
+            'salary_min': st.session_state.validated_data['Salary'].min(),
+            'salary_max': st.session_state.validated_data['Salary'].max(),
+            'projection_min': st.session_state.validated_data['Projection'].min(),
+            'projection_max': st.session_state.validated_data['Projection'].max(),
+            'ownership_min': st.session_state.validated_data['Ownership'].min(),
+            'ownership_max': st.session_state.validated_data['Ownership'].max(),
+        }
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Players", stats["total_players"])
+        col2.metric("Salary Range", f"${stats['salary_min']:,.0f} – ${stats['salary_max']:,.0f}")
+        col3.metric("Proj Range", f"{stats['projection_min']:.1f} – {stats['projection_max']:.1f}")
+        col4.metric("Own Range", f"{stats['ownership_min']:.1%} – {stats['ownership_max']:.1%}")
+        st.info("💡 Upload a new file to replace existing data, or use the Reset button to clear everything.")
+    
     uploaded_file = st.file_uploader(
         "Upload DraftKings CSV (Classic or Showdown format)",
         type=["csv"],
         help="Supports DraftKings Classic (full tournament) and Showdown (single round) formats"
     )
+    
     if uploaded_file:
         try:
             raw_df = pd.read_csv(uploaded_file)
@@ -115,13 +138,15 @@ def render_file_upload():
             validated_df, stats = validator.validate_and_process(df)
             st.session_state.validated_data = validated_df
             st.session_state.player_pool = PlayerPool(validated_df)
+            st.session_state.uploaded_filename = uploaded_file.name
             st.session_state.excluded_players = set()
-            st.success(f"✅ Loaded {stats['total_players']} players")
+            st.success(f"✅ Loaded {stats['total_players']} players from **{uploaded_file.name}**")
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Players", stats["total_players"])
             col2.metric("Salary Range", f"${stats['salary_min']:,.0f} – ${stats['salary_max']:,.0f}")
             col3.metric("Proj Range", f"{stats['projection_min']:.1f} – {stats['projection_max']:.1f}")
             col4.metric("Own Range", f"{stats['ownership_min']:.1%} – {stats['ownership_max']:.1%}")
+            st.rerun()  # Refresh to show the persistent data message
         except Exception as e:
             st.error(f"❌ Error: {e}")
             import traceback; st.code(traceback.format_exc())
@@ -1088,12 +1113,14 @@ def main():
     st.title("⚡ DFS Optimizer Pro")
     st.markdown("**DraftKings Golf Optimizer** | MILP · Monte Carlo · Smart Ownership")
     
-    # Reset Settings Button
-    with st.expander("🔄 Reset Settings", expanded=False):
-        st.markdown("**Reset optimization settings to defaults** (keeps uploaded player data)")
-        col1, col2 = st.columns([3, 1])
-        with col2:
-            if st.button("🔄 Reset to Defaults", type="secondary"):
+    # Reset Options
+    with st.expander("🔄 Reset Options", expanded=False):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Reset Settings Only**")
+            st.caption("Clears optimization settings but keeps uploaded player data")
+            if st.button("🔄 Reset Settings", type="secondary", key="reset_settings"):
                 # Clear settings but keep player data
                 st.session_state.current_settings = {}
                 st.session_state.excluded_players = set()
@@ -1104,7 +1131,27 @@ def main():
                 st.session_state.rule_engine = RuleEngine()
                 st.session_state.generated_lineups = None
                 st.session_state.simulation_results = None
-                st.success("✅ Settings reset to defaults!")
+                st.success("✅ Settings reset! Player data retained.")
+                st.rerun()
+        
+        with col2:
+            st.markdown("**Reset Everything**")
+            st.caption("Clears uploaded data AND all settings")
+            if st.button("🗑️ Reset All", type="secondary", key="reset_all"):
+                # Clear ALL data and settings
+                st.session_state.current_settings = {}
+                st.session_state.player_pool = None
+                st.session_state.validated_data = None
+                st.session_state.uploaded_filename = None
+                st.session_state.excluded_players = set()
+                st.session_state.player_min_own = {}
+                st.session_state.player_max_own = {}
+                st.session_state.custom_rules = []
+                st.session_state.exposure_manager = ExposureManager()
+                st.session_state.rule_engine = RuleEngine()
+                st.session_state.generated_lineups = None
+                st.session_state.simulation_results = None
+                st.success("✅ All data and settings cleared!")
                 st.rerun()
     
     st.markdown("---")
