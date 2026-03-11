@@ -234,33 +234,52 @@ def render_game_mode_selector():
 def render_optimization_settings():
     st.header("4️⃣ Optimization Settings")
     
-    # Load previous settings if available
-    prev = st.session_state.get("current_settings", {})
+    # Initialize previous settings safely
+    if "current_settings" not in st.session_state:
+        st.session_state.current_settings = {}
+    prev = st.session_state.current_settings
     
-    # Add mode radio button
+    # Mode selection with safe defaults
     default_mode = prev.get("mode", "Tournament")
     mode_options = ["Cash Game", "Tournament"]
-    default_index = mode_options.index(default_mode) if default_mode in mode_options else 1
-    opt_mode = st.radio("Mode", mode_options, index=default_index)
+    if default_mode not in mode_options:
+        default_mode = "Tournament"
+    default_index = mode_options.index(default_mode)
+        
+    opt_mode = st.radio("Mode", ["Cash Game", "Tournament"], index=default_index)
     
     c1, c2 = st.columns(2)
     
+    # Number of lineups with safe defaults
     default_lineups = 20 if opt_mode == "Tournament" else 3
-    num_lineups = c1.slider("Number of Lineups", 1, 150, 
-                            prev.get("num_lineups", default_lineups))
-    min_salary = c1.number_input("Min Salary Floor", 0, 50000, 
-                                  prev.get("min_salary_input", 0), 1000)
+    num_lineups = c1.slider(
+        "Number of Lineups", 
+        min_value=1, 
+        max_value=150, 
+        value=prev.get("num_lineups", default_lineups)
+    )
+    
+    min_salary = c1.number_input(
+        "Min Salary Floor", 
+        min_value=0, 
+        max_value=50000, 
+        value=prev.get("min_salary_input", 0), 
+        step=1000
+    )
+    
     unique_players = c1.selectbox(
         "Minimum Unique Players Per Lineup",
         options=[1, 2, 3, 4, 5, 6], 
-        index=max(0, prev.get("unique_players", 1) - 1),
+        index=max(0, min(5, prev.get("unique_players", 1) - 1)),
         help="Each lineup must differ from prior lineups by at least this many players"
     )
     
     # Global max ownership cap
     global_max_own = c1.slider(
         "Global Max Ownership % (applies to all players)",
-        0, 100, prev.get("global_max_ownership_pct", 100),
+        min_value=0, 
+        max_value=100, 
+        value=prev.get("global_max_ownership_pct", 100),
         help="No player can appear in more than this % of lineups (overrides individual settings)"
     )
     
@@ -269,29 +288,53 @@ def render_optimization_settings():
     ccol1, ccol2 = st.columns(2)
     min_comb_own = ccol1.slider(
         "Min Combinatorial Ownership %",
-        0, 100, prev.get("min_combinatorial_own_pct", 0),
+        min_value=0, 
+        max_value=100, 
+        value=prev.get("min_combinatorial_own_pct", 0),
         help="Lineups below this combined ownership % will be removed"
     )
     max_comb_own = ccol2.slider(
         "Max Combinatorial Ownership %",
-        0, 250, prev.get("max_combinatorial_own_pct", 100),
+        min_value=0, 
+        max_value=250, 
+        value=prev.get("max_combinatorial_own_pct", 100),
         help="Lineups above this combined ownership % will be removed (can exceed 100% for high-ownership lineups)"
     )
     
+    # Variance
     default_var = 15.0 if opt_mode == "Tournament" else 0.0
-    variance_pct = c2.slider("Variance %", 0.0, 50.0, 
-                             prev.get("variance_pct_input", default_var), 1.0) / 100
+    variance_pct = c2.slider(
+        "Variance %", 
+        min_value=0.0, 
+        max_value=50.0, 
+        value=prev.get("variance_pct_input", default_var), 
+        step=1.0
+    ) / 100
     
+    # Tournament-specific settings
     if opt_mode == "Tournament":
-        proj_weight = c2.slider("Projection Weight %", 0, 100, 
-                                prev.get("projection_weight_pct", 70)) / 100
-        own_weight  = c2.slider("Ownership Leverage %", 0, 100, 
-                                prev.get("ownership_weight_pct", 30)) / 100
-        own_penalty = c2.slider("High-Own Penalty Threshold %", 0, 50, 
-                                prev.get("ownership_penalty_threshold_pct", 15)) / 100
+        proj_weight = c2.slider(
+            "Projection Weight %", 
+            min_value=0, 
+            max_value=100, 
+            value=prev.get("projection_weight_pct", 70)
+        ) / 100
+        own_weight = c2.slider(
+            "Ownership Leverage %", 
+            min_value=0, 
+            max_value=100, 
+            value=prev.get("ownership_weight_pct", 30)
+        ) / 100
+        own_penalty = c2.slider(
+            "High-Own Penalty Threshold %", 
+            min_value=0, 
+            max_value=50, 
+            value=prev.get("ownership_penalty_threshold_pct", 15)
+        ) / 100
     else:
         proj_weight, own_weight, own_penalty = 1.0, 0.0, 1.0
     
+    # Build settings dict
     settings = {
         "mode": opt_mode,
         "num_lineups": num_lineups,
