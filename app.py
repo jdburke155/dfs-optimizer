@@ -122,7 +122,7 @@ def render_file_upload():
         col2.metric("Salary Range", f"${stats['salary_min']:,.0f} – ${stats['salary_max']:,.0f}")
         col3.metric("Proj Range", f"{stats['projection_min']:.1f} – {stats['projection_max']:.1f}")
         col4.metric("Own Range", f"{stats['ownership_min']:.1%} – {stats['ownership_max']:.1%}")
-        st.info("💡 Upload a new file to replace existing data, or use the Reset button to clear everything.")
+        st.info("💡 **Data persists during your browser session.** Upload new file to replace, or use Reset button to clear. (Note: Closing browser tab will clear data)")
     
     uploaded_file = st.file_uploader(
         "Upload DraftKings CSV (Classic or Showdown format)",
@@ -1063,12 +1063,23 @@ def render_exposure_analysis():
     exp_df = st.session_state.exposure_manager.calculate_exposure(st.session_state.generated_lineups)
     if exp_df.empty:
         return
-    disp = [c for c in ["Player", "Exposure", "Count", "Salary", "Projection", "Ownership"] if c in exp_df.columns]
-    st.dataframe(exp_df[disp], use_container_width=True)
+    
+    # Format for display
+    display_df = exp_df.copy()
+    if "Exposure" in display_df.columns:
+        display_df["Exposure"] = display_df["Exposure"].apply(lambda x: f"{x:.1%}")
+    if "Ownership" in display_df.columns:
+        display_df["Ownership"] = display_df["Ownership"].apply(lambda x: f"{x:.1%}")
+    
+    disp = [c for c in ["Player", "Exposure", "Count", "Salary", "Projection", "Ownership"] if c in display_df.columns]
+    st.dataframe(display_df[disp], use_container_width=True)
+    
+    # Use original exp_df (with numeric values) for the chart
     fig = px.bar(exp_df.head(20), x="Player", y="Exposure",
                  color="Exposure", color_continuous_scale="Viridis",
                  title="Top 20 Players by Exposure")
     fig.update_layout(xaxis_tickangle=-45)
+    fig.update_yaxes(tickformat=".0%")  # Format y-axis as percentage
     st.plotly_chart(fig, use_container_width=True)
 
 
