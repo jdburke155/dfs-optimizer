@@ -146,7 +146,6 @@ def render_file_upload():
             col2.metric("Salary Range", f"${stats['salary_min']:,.0f} – ${stats['salary_max']:,.0f}")
             col3.metric("Proj Range", f"{stats['projection_min']:.1f} – {stats['projection_max']:.1f}")
             col4.metric("Own Range", f"{stats['ownership_min']:.1%} – {stats['ownership_max']:.1%}")
-            st.rerun()  # Refresh to show the persistent data message
         except Exception as e:
             st.error(f"❌ Error: {e}")
             import traceback; st.code(traceback.format_exc())
