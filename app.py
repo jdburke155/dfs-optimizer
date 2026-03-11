@@ -305,13 +305,15 @@ def render_optimization_settings():
         "Min Combinatorial Ownership %", 
         min_value=0, 
         max_value=100, 
-        value=prev.get("min_comb_own_pct", 0)
+        value=prev.get("min_comb_own_pct", 0),
+        help="Sum of all 6 golfers' ownership percentages (e.g., 6 golfers at 10% each = 60%)"
     )
     max_comb_own = ccol2.slider(
         "Max Combinatorial Ownership %", 
-        min_value=0, 
-        max_value=250, 
-        value=prev.get("max_comb_own_pct", 100)
+        min_value=5, 
+        max_value=200, 
+        value=prev.get("max_comb_own_pct", 100),
+        help="Sum of all 6 golfers' ownership percentages (e.g., 6 golfers at 20% each = 120%)"
     )
     
     default_var = 15.0 if opt_mode == "Tournament" else 0.0
