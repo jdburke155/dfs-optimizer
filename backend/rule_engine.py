@@ -149,6 +149,25 @@ class RuleEngine:
                         for pid in expensive_ids if pid in player_vars
                     ) <= max_salary
                     constraints.append(constraint)
+            
+            elif rule.rule_type == "tee_time_constraint":
+                label = rule.params.get("label", "")  # "AM/PM" or "PM/AM"
+                min_count = rule.params.get("min_count", 0)
+                max_count = rule.params.get("max_count", 6)
+                tee_time_labels = rule.params.get("tee_time_labels", {})
+                
+                # Find all player IDs with this label
+                matching_ids = [
+                    pid for pid, player_label in tee_time_labels.items()
+                    if player_label == label and str(pid) in player_vars
+                ]
+                
+                if matching_ids:
+                    player_sum = sum(player_vars[str(pid)] for pid in matching_ids)
+                    if min_count > 0:
+                        constraints.append(player_sum >= min_count)
+                    if max_count < 6:
+                        constraints.append(player_sum <= max_count)
         
         return constraints
     
@@ -180,6 +199,23 @@ class RuleEngine:
                 total_salary = sum(p['Salary'] for p in lineup)
                 if total_salary < min_salary:
                     violations.append(f"Rule {i+1}: Salary ${total_salary} below ${min_salary}")
+            
+            elif rule.rule_type == "tee_time_constraint":
+                label = rule.params.get("label", "")
+                min_count = rule.params.get("min_count", 0)
+                max_count = rule.params.get("max_count", 6)
+                tee_time_labels = rule.params.get("tee_time_labels", {})
+                
+                # Count players with this tee time label in lineup
+                count = sum(
+                    1 for p in lineup 
+                    if str(p.get('ID')) in tee_time_labels and tee_time_labels[str(p['ID'])] == label
+                )
+                
+                if count < min_count:
+                    violations.append(f"Rule {i+1}: Need at least {min_count} {label} players (have {count})")
+                if count > max_count:
+                    violations.append(f"Rule {i+1}: Too many {label} players (max {max_count}, have {count})")
         
         return len(violations) == 0, violations
     
