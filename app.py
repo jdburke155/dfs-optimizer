@@ -169,23 +169,39 @@ def render_player_pool():
 
     st.markdown("**Check Exclude to remove a player from all lineups.**")
 
-    # Convert decimals to readable strings BEFORE displaying
-    display_df["Ownership"] = display_df["Ownership"].apply(
-        lambda x: f"{x:.1%}" if pd.notnull(x) else ""
-    )
-    if "MakeCut" in display_df.columns:
-        display_df["MakeCut"] = display_df["MakeCut"].apply(
-            lambda x: f"{x:.0%}" if pd.notnull(x) else ""
-        )
-    if "SmallOwn" in display_df.columns:
-        display_df["SmallOwn"] = display_df["SmallOwn"].apply(
-            lambda x: f"{x:.1%}" if pd.notnull(x) else ""
-        )
-
+    # Don't convert to strings - use column config for formatting instead
+    # This allows proper numerical sorting
     col_cfg = {
         "Exclude": st.column_config.CheckboxColumn("❌ Exclude"),
         "Salary":  st.column_config.NumberColumn("Salary", format="$%d"),
+        "Ownership": st.column_config.NumberColumn("Ownership", format="%.1f%%"),
+        "Projection": st.column_config.NumberColumn("Projection", format="%.1f"),
     }
+    
+    # Add percentage formatting for optional columns if they exist
+    if "MakeCut" in display_df.columns:
+        col_cfg["MakeCut"] = st.column_config.NumberColumn("MakeCut", format="%.0f%%")
+    
+    if "SmallOwn" in display_df.columns:
+        col_cfg["SmallOwn"] = st.column_config.NumberColumn("SmallOwn", format="%.1f%%")
+    
+    if "Value" in display_df.columns:
+        col_cfg["Value"] = st.column_config.NumberColumn("Value", format="%.2f")
+    
+    if "Ceiling" in display_df.columns:
+        col_cfg["Ceiling"] = st.column_config.NumberColumn("Ceiling", format="%.1f")
+    
+    if "Volatility" in display_df.columns:
+        col_cfg["Volatility"] = st.column_config.NumberColumn("Volatility", format="%.1f")
+    
+    # Convert ownership columns from decimal to percentage (multiply by 100)
+    # This way they display as percentages but sort numerically
+    if "Ownership" in display_df.columns:
+        display_df["Ownership"] = display_df["Ownership"] * 100
+    if "MakeCut" in display_df.columns:
+        display_df["MakeCut"] = display_df["MakeCut"] * 100
+    if "SmallOwn" in display_df.columns:
+        display_df["SmallOwn"] = display_df["SmallOwn"] * 100
 
     edited = st.data_editor(
         display_df,
@@ -586,26 +602,110 @@ def render_tee_time_manager():
         st.subheader("Current Label Summary")
         am_pm_count = sum(1 for label in st.session_state.tee_time_labels.values() if label == "AM/PM")
         pm_am_count = sum(1 for label in st.session_state.tee_time_labels.values() if label == "PM/AM")
+        unlabeled_count = len(df) - am_pm_count - pm_am_count
         
         col1, col2, col3 = st.columns(3)
         col1.metric("AM/PM Players", am_pm_count)
         col2.metric("PM/AM Players", pm_am_count)
-        col3.metric("Unlabeled", len(df) - am_pm_count - pm_am_count)
+        col3.metric("Unlabeled", unlabeled_count)
         
-        # Show labeled players
-        with st.expander("View All Labeled Players"):
-            labeled_data = []
+        # Clickable sections to view each group
+        st.markdown("---")
+        
+        # AM/PM Players
+        with st.expander(f"👁️ View AM/PM Players ({am_pm_count})", expanded=False):
+            am_pm_players = []
             for player_id, label in st.session_state.tee_time_labels.items():
-                player_row = df[df["ID"].astype(str) == player_id]
-                if not player_row.empty:
-                    labeled_data.append({
-                        "Player": player_row.iloc[0]["Player"],
-                        "Label": label,
-                        "Salary": player_row.iloc[0]["Salary"],
-                        "Projection": player_row.iloc[0]["Projection"]
+                if label == "AM/PM":
+                    player_row = df[df["ID"].astype(str) == player_id]
+                    if not player_row.empty:
+                        am_pm_players.append({
+                            "Player": player_row.iloc[0]["Player"],
+                            "Salary": player_row.iloc[0]["Salary"],
+                            "Projection": player_row.iloc[0]["Projection"]
+                        })
+            
+            if am_pm_players:
+                st.dataframe(pd.DataFrame(am_pm_players), use_container_width=True, hide_index=True)
+            else:
+                st.info("No AM/PM players assigned yet.")
+        
+        # PM/AM Players
+        with st.expander(f"👁️ View PM/AM Players ({pm_am_count})", expanded=False):
+            pm_am_players = []
+            for player_id, label in st.session_state.tee_time_labels.items():
+                if label == "PM/AM":
+                    player_row = df[df["ID"].astype(str) == player_id]
+                    if not player_row.empty:
+                        pm_am_players.append({
+                            "Player": player_row.iloc[0]["Player"],
+                            "Salary": player_row.iloc[0]["Salary"],
+                            "Projection": player_row.iloc[0]["Projection"]
+                        })
+            
+            if pm_am_players:
+                st.dataframe(pd.DataFrame(pm_am_players), use_container_width=True, hide_index=True)
+            else:
+                st.info("No PM/AM players assigned yet.")
+        
+        # Unlabeled Players - with quick labeling interface
+        with st.expander(f"⚠️ View & Label Unlabeled Players ({unlabeled_count})", expanded=unlabeled_count > 0):
+            labeled_player_ids = set(st.session_state.tee_time_labels.keys())
+            unlabeled_players = []
+            
+            for idx, row in df.iterrows():
+                player_id = str(row["ID"])
+                if player_id not in labeled_player_ids:
+                    unlabeled_players.append({
+                        "Player": row["Player"],
+                        "ID": player_id,
+                        "Salary": row["Salary"],
+                        "Projection": row["Projection"]
                     })
-            if labeled_data:
-                st.dataframe(pd.DataFrame(labeled_data), use_container_width=True, hide_index=True)
+            
+            if unlabeled_players:
+                st.warning(f"⚠️ {len(unlabeled_players)} players don't have tee time labels yet")
+                
+                # Show the unlabeled players
+                unlabeled_df = pd.DataFrame(unlabeled_players)
+                st.dataframe(unlabeled_df[["Player", "Salary", "Projection"]], use_container_width=True, hide_index=True)
+                
+                st.markdown("**Quick Label Assignment:**")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("**Assign as AM/PM**")
+                    am_pm_quick = st.multiselect(
+                        "Select unlabeled players to assign AM/PM",
+                        options=[p["Player"] for p in unlabeled_players],
+                        key="unlabeled_am_pm_select"
+                    )
+                    if st.button("✅ Assign AM/PM", key="assign_unlabeled_ampm") and am_pm_quick:
+                        for player_name in am_pm_quick:
+                            # Find player ID
+                            player_data = [p for p in unlabeled_players if p["Player"] == player_name]
+                            if player_data:
+                                st.session_state.tee_time_labels[player_data[0]["ID"]] = "AM/PM"
+                        st.success(f"✅ Assigned {len(am_pm_quick)} players to AM/PM")
+                        st.rerun()
+                
+                with col2:
+                    st.markdown("**Assign as PM/AM**")
+                    pm_am_quick = st.multiselect(
+                        "Select unlabeled players to assign PM/AM",
+                        options=[p["Player"] for p in unlabeled_players],
+                        key="unlabeled_pm_am_select"
+                    )
+                    if st.button("✅ Assign PM/AM", key="assign_unlabeled_pmam") and pm_am_quick:
+                        for player_name in pm_am_quick:
+                            # Find player ID
+                            player_data = [p for p in unlabeled_players if p["Player"] == player_name]
+                            if player_data:
+                                st.session_state.tee_time_labels[player_data[0]["ID"]] = "PM/AM"
+                        st.success(f"✅ Assigned {len(pm_am_quick)} players to PM/AM")
+                        st.rerun()
+            else:
+                st.success("✅ All players have been labeled!")
 
 
     if st.session_state.player_min_own or st.session_state.player_max_own:
