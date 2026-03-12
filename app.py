@@ -265,6 +265,31 @@ def parse_tee_time_text(text_input, player_pool_df):
         if line.lower().startswith('tee '):
             continue
         
+        # Try to parse times-first format: "12:54 p.m., 8:04 a.m.: Player1, Player2, Player3"
+        # Times come BEFORE the colon, players AFTER
+        times_first_match = re.match(
+            r'(\d{1,2}:\d{2})\s*(a\.?m\.?|p\.?m\.?)\s*,\s*(\d{1,2}:\d{2})\s*(a\.?m\.?|p\.?m\.?)\s*:\s*(.+)',
+            line,
+            re.IGNORECASE
+        )
+        
+        if times_first_match:
+            thu_time = times_first_match.group(1)
+            thu_am_pm = times_first_match.group(2).replace('.', '').upper()
+            fri_time = times_first_match.group(3)
+            fri_am_pm = times_first_match.group(4).replace('.', '').upper()
+            players_str = times_first_match.group(5)
+            
+            # Split players by comma
+            players_in_group = [p.strip() for p in players_str.split(',')]
+            
+            for player_str in players_in_group:
+                matched_player = match_player_name(player_str, player_names)
+                if matched_player:
+                    player_round1[matched_player] = thu_am_pm
+                    player_round2[matched_player] = fri_am_pm
+            continue
+        
         # Try to parse single-line format: "Player Name - 7:24 a.m., 12:09 p.m."
         # First time = Thursday, Second time = Friday
         single_line_match = re.match(
@@ -422,53 +447,47 @@ def render_tee_time_manager():
     
     with st.expander("How to import from PGA Tour website", expanded=False):
         st.markdown("""
-        **Method 1: Single-Line Format (Most Common)**
+        **The app automatically detects these formats:**
         
-        If the PGA Tour page shows tee times like this:
+        **Format 1: Times First, Players After Colon** (Most Common)
+        ```
+        12:54 p.m., 8:04 a.m.: Chad Ramey, Alex Smalley, Pierceson Coody
+        1:06 p.m., 8:16 a.m.: Kurt Kitayama, Harry Hall, Stephan Jaeger
+        1:18 p.m., 8:28 a.m.: Keegan Bradley, Ryan Fox, Chris Kirk
+        ```
+        *(First time = Thursday, Second time = Friday)*
+        
+        **Format 2: Player Name First**
         ```
         Scottie Scheffler - 7:24 a.m., 12:09 p.m.
         Rory McIlroy - 12:09 p.m., 7:24 a.m.
-        Jon Rahm - 7:35 a.m., 12:20 p.m.
         ```
         
-        Just copy and paste the entire list! The app automatically detects:
-        - **First time** = Thursday (Round 1)
-        - **Second time** = Friday (Round 2)
-        - Assigns AM/PM or PM/AM based on both times
-        
-        ---
-        
-        **Method 2: Grouped Format**
-        
-        If shown in grouped sections with "Round 1" and "Round 2" headers:
+        **Format 3: Grouped by Rounds**
         ```
         Round 1 - Thursday
         7:24 a.m. - Scottie Scheffler, Xander Schauffele
-        12:09 p.m. - Rory McIlroy, Patrick Cantlay
         
         Round 2 - Friday
         12:09 p.m. - Scottie Scheffler, Xander Schauffele
-        7:24 a.m. - Rory McIlroy, Patrick Cantlay
         ```
         
-        Copy the full section and paste it here!
-        
-        ---
-        
-        **Method 3: Manual Format**
-        
-        If you already know the labels:
+        **Format 4: Manual**
         ```
         Scottie Scheffler - AM/PM
         Rory McIlroy - PM/AM
         ```
+        
+        ---
+        
+        **Just copy and paste from PGA Tour - the app figures out the format!**
         """)
     
     tee_time_text = st.text_area(
         "Paste tee time data",
         height=200,
-        placeholder="Examples:\n\nSingle-line:\nScottie Scheffler - 7:24 a.m., 12:09 p.m.\nRory McIlroy - 12:09 p.m., 7:24 a.m.\n\nOR Grouped:\nRound 1 - Thursday\n7:24 a.m. - Player1, Player2\n\nRound 2 - Friday\n12:09 p.m. - Player1, Player2",
-        help="Paste directly from PGA Tour website - works with any format!"
+        placeholder="Example:\n12:54 p.m., 8:04 a.m.: Player1, Player2\n1:06 p.m., 8:16 a.m.: Player3, Player4\n\nJust paste from PGA Tour website!",
+        help="Works with any PGA Tour tee time format - paste and click Import!"
     )
     
     col1, col2 = st.columns([1, 4])
