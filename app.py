@@ -95,6 +95,7 @@ def initialize_session_state():
         "custom_rules": [],
         "current_settings": {},  # Stores optimization settings for persistence
         "uploaded_filename": None,  # Track uploaded file name
+        "tee_time_labels": {},  # Store tee time labels: {player_id: "AM/PM" or "PM/AM"}
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -217,6 +218,376 @@ def render_player_pool():
             st.session_state.player_min_own[pid] = new_min / 100
             st.session_state.player_max_own[pid] = new_max / 100
             st.success(f"Set {sel}: min {new_min}%, max {new_max}%")
+
+
+def parse_tee_time_text(text_input, player_pool_df):
+    """
+    Parse pasted tee time data from PGA Tour website or manual format.
+    
+    Handles formats like:
+    PGA Tour format:
+      "7:24 a.m. - Scottie Scheffler, Xander Schauffele, Ludvig Aberg"
+      "12:09 p.m. - Rory McIlroy, Patrick Cantlay, Viktor Hovland"
+    
+    Or simple format:
+      "Scottie Scheffler - AM/PM"
+      "Rory McIlroy - PM/AM"
+    
+    Returns dict of {player_id: label}
+    """
+    import re
+    
+    assignments = {}
+    player_names = player_pool_df["Player"].tolist()
+    
+    # Track player tee times for Round 1 and Round 2
+    player_round1 = {}  # {player_name: "AM" or "PM"}
+    player_round2 = {}  # {player_name: "AM" or "PM"}
+    
+    current_round = None  # "Round 1" or "Round 2"
+    
+    lines = text_input.strip().split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Detect round headers
+        if 'round 1' in line.lower() or 'thursday' in line.lower():
+            current_round = "Round 1"
+            continue
+        elif 'round 2' in line.lower() or 'friday' in line.lower():
+            current_round = "Round 2"
+            continue
+        
+        # Skip tee headers
+        if line.lower().startswith('tee '):
+            continue
+        
+        # Try to parse single-line format: "Player Name - 7:24 a.m., 12:09 p.m."
+        # First time = Thursday, Second time = Friday
+        single_line_match = re.match(
+            r'(.+?)\s*[-–]\s*(\d{1,2}:\d{2})\s*(a\.?m\.?|p\.?m\.?)\s*,\s*(\d{1,2}:\d{2})\s*(a\.?m\.?|p\.?m\.?)',
+            line,
+            re.IGNORECASE
+        )
+        
+        if single_line_match:
+            player_str = single_line_match.group(1).strip()
+            thu_time = single_line_match.group(2)
+            thu_am_pm = single_line_match.group(3).replace('.', '').upper()
+            fri_time = single_line_match.group(4)
+            fri_am_pm = single_line_match.group(5).replace('.', '').upper()
+            
+            # Match player name
+            matched_player = match_player_name(player_str, player_names)
+            
+            if matched_player:
+                player_round1[matched_player] = thu_am_pm
+                player_round2[matched_player] = fri_am_pm
+            continue
+        
+        # Try to parse PGA Tour format: "7:24 a.m. - Player1, Player2, Player3"
+        time_match = re.match(r'(\d{1,2}:\d{2})\s*(a\.?m\.?|p\.?m\.?)\s*[-–]\s*(.+)', line, re.IGNORECASE)
+        
+        if time_match:
+            time_str = time_match.group(1)
+            am_pm = time_match.group(2).replace('.', '').upper()  # "AM" or "PM"
+            players_str = time_match.group(3)
+            
+            # Split players by comma
+            players_in_group = [p.strip() for p in players_str.split(',')]
+            
+            for player_str in players_in_group:
+                # Try to match to player pool
+                matched_player = match_player_name(player_str, player_names)
+                
+                if matched_player and current_round:
+                    if current_round == "Round 1":
+                        player_round1[matched_player] = am_pm
+                    elif current_round == "Round 2":
+                        player_round2[matched_player] = am_pm
+        
+        # Also handle simple format: "Player Name - AM/PM" or "Player Name - PM/AM"
+        elif 'AM/PM' in line.upper():
+            label = "AM/PM"
+            player_part = re.sub(r'[-,|\t]?\s*AM/PM', '', line, flags=re.IGNORECASE).strip()
+            matched_player = match_player_name(player_part, player_names)
+            
+            if matched_player:
+                player_row = player_pool_df[player_pool_df["Player"] == matched_player]
+                if not player_row.empty:
+                    player_id = str(player_row.iloc[0]["ID"])
+                    assignments[player_id] = label
+        
+        elif 'PM/AM' in line.upper():
+            label = "PM/AM"
+            player_part = re.sub(r'[-,|\t]?\s*PM/AM', '', line, flags=re.IGNORECASE).strip()
+            matched_player = match_player_name(player_part, player_names)
+            
+            if matched_player:
+                player_row = player_pool_df[player_pool_df["Player"] == matched_player]
+                if not player_row.empty:
+                    player_id = str(player_row.iloc[0]["ID"])
+                    assignments[player_id] = label
+    
+    # Now assign labels based on Round 1 and Round 2 times
+    for player in player_round1.keys():
+        if player in player_round2:
+            r1_time = player_round1[player]
+            r2_time = player_round2[player]
+            
+            # Determine label
+            if r1_time == "AM" and r2_time == "PM":
+                label = "AM/PM"
+            elif r1_time == "PM" and r2_time == "AM":
+                label = "PM/AM"
+            else:
+                # Same time both rounds - skip
+                continue
+            
+            # Assign to player
+            player_row = player_pool_df[player_pool_df["Player"] == player]
+            if not player_row.empty:
+                player_id = str(player_row.iloc[0]["ID"])
+                assignments[player_id] = label
+    
+    return assignments
+
+
+def match_player_name(input_name, player_pool_names):
+    """
+    Match an input name to the player pool, handling variations.
+    Returns matched name or None.
+    """
+    input_clean = input_name.lower().strip()
+    
+    # First try exact match
+    for pool_player in player_pool_names:
+        if pool_player.lower() == input_clean:
+            return pool_player
+    
+    # Try matching last name (common in player pool)
+    # e.g., "McIlroy" matches "Rory McIlroy"
+    input_parts = input_clean.split()
+    if input_parts:
+        last_name = input_parts[-1]
+        for pool_player in player_pool_names:
+            pool_parts = pool_player.lower().split()
+            if pool_parts and pool_parts[-1] == last_name:
+                # Check if first names match or one is initial
+                if len(input_parts) > 1 and len(pool_parts) > 1:
+                    # Both have first names, check if they match
+                    if input_parts[0][0] == pool_parts[0][0]:  # Same first initial
+                        return pool_player
+                else:
+                    return pool_player
+    
+    # Try substring match
+    for pool_player in player_pool_names:
+        if input_clean in pool_player.lower() or pool_player.lower() in input_clean:
+            return pool_player
+    
+    return None
+
+
+def render_tee_time_manager():
+    """Manage tee time labels for players (AM/PM or PM/AM based on Thu/Fri tee times)"""
+    st.header("2.5️⃣ Tee Time Labels")
+    
+    if st.session_state.player_pool is None:
+        st.info("Upload data first.")
+        return
+    
+    df = st.session_state.player_pool.get_player_data()
+    
+    with st.expander("ℹ️ About Tee Time Labels", expanded=False):
+        st.markdown("""
+        **Tee Time Labels Help:**
+        - **AM/PM**: Player tees off Thursday morning, Friday afternoon
+        - **PM/AM**: Player tees off Thursday afternoon, Friday morning
+        
+        **Why it matters:** Weather conditions, course conditions, and scoring opportunities 
+        often differ between morning/afternoon rounds. Use this to balance your lineups.
+        
+        **How to use:**
+        1. Find tee times on PGA Tour website or DraftKings
+        2. Use quick import (paste data), OR manually assign labels
+        3. Use the Rules Engine to set min/max players per label
+        """)
+    
+    # Quick import section
+    st.subheader("📋 Quick Import from Tee Times")
+    
+    with st.expander("How to import from PGA Tour website", expanded=False):
+        st.markdown("""
+        **Method 1: Single-Line Format (Most Common)**
+        
+        If the PGA Tour page shows tee times like this:
+        ```
+        Scottie Scheffler - 7:24 a.m., 12:09 p.m.
+        Rory McIlroy - 12:09 p.m., 7:24 a.m.
+        Jon Rahm - 7:35 a.m., 12:20 p.m.
+        ```
+        
+        Just copy and paste the entire list! The app automatically detects:
+        - **First time** = Thursday (Round 1)
+        - **Second time** = Friday (Round 2)
+        - Assigns AM/PM or PM/AM based on both times
+        
+        ---
+        
+        **Method 2: Grouped Format**
+        
+        If shown in grouped sections with "Round 1" and "Round 2" headers:
+        ```
+        Round 1 - Thursday
+        7:24 a.m. - Scottie Scheffler, Xander Schauffele
+        12:09 p.m. - Rory McIlroy, Patrick Cantlay
+        
+        Round 2 - Friday
+        12:09 p.m. - Scottie Scheffler, Xander Schauffele
+        7:24 a.m. - Rory McIlroy, Patrick Cantlay
+        ```
+        
+        Copy the full section and paste it here!
+        
+        ---
+        
+        **Method 3: Manual Format**
+        
+        If you already know the labels:
+        ```
+        Scottie Scheffler - AM/PM
+        Rory McIlroy - PM/AM
+        ```
+        """)
+    
+    tee_time_text = st.text_area(
+        "Paste tee time data",
+        height=200,
+        placeholder="Examples:\n\nSingle-line:\nScottie Scheffler - 7:24 a.m., 12:09 p.m.\nRory McIlroy - 12:09 p.m., 7:24 a.m.\n\nOR Grouped:\nRound 1 - Thursday\n7:24 a.m. - Player1, Player2\n\nRound 2 - Friday\n12:09 p.m. - Player1, Player2",
+        help="Paste directly from PGA Tour website - works with any format!"
+    )
+    
+    col1, col2 = st.columns([1, 4])
+    if col1.button("📥 Import Tee Times", type="primary", disabled=not tee_time_text):
+        assignments = parse_tee_time_text(tee_time_text, df)
+        
+        if assignments:
+            # Apply assignments
+            for player_id, label in assignments.items():
+                st.session_state.tee_time_labels[player_id] = label
+            
+            # Show detailed summary
+            am_pm_count = sum(1 for label in assignments.values() if label == "AM/PM")
+            pm_am_count = sum(1 for label in assignments.values() if label == "PM/AM")
+            
+            st.success(f"✅ Successfully imported {len(assignments)} players!")
+            
+            # Show breakdown
+            col_a, col_b = st.columns(2)
+            col_a.metric("AM/PM (Thu AM, Fri PM)", am_pm_count)
+            col_b.metric("PM/AM (Thu PM, Fri AM)", pm_am_count)
+            
+            # Show matched players in expander
+            with st.expander("View imported players"):
+                am_pm_players = [
+                    df[df["ID"].astype(str) == pid].iloc[0]["Player"]
+                    for pid, label in assignments.items() if label == "AM/PM"
+                ]
+                pm_am_players = [
+                    df[df["ID"].astype(str) == pid].iloc[0]["Player"]
+                    for pid, label in assignments.items() if label == "PM/AM"
+                ]
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("**AM/PM Players:**")
+                    for p in sorted(am_pm_players):
+                        st.write(f"- {p}")
+                
+                with col2:
+                    st.markdown("**PM/AM Players:**")
+                    for p in sorted(pm_am_players):
+                        st.write(f"- {p}")
+            
+            st.rerun()
+        else:
+            st.warning("⚠️ No players matched. Make sure you copied the tee times correctly from PGA Tour.")
+            st.info("💡 **Tip:** Copy the entire tee times section including 'Round 1' and 'Round 2' headers")
+    
+    st.divider()
+    
+    # Quick assign section
+    st.subheader("Manual Label Assignment")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**Assign AM/PM Label**")
+        am_pm_players = st.multiselect(
+            "Select players with AM/PM tee times",
+            options=df["Player"].tolist(),
+            default=[p for p, label in st.session_state.tee_time_labels.items() 
+                    if label == "AM/PM" and p in df["Player"].values],
+            key="am_pm_select"
+        )
+        if st.button("✅ Set as AM/PM", key="set_ampm"):
+            for player in am_pm_players:
+                player_id = str(df[df["Player"] == player].iloc[0]["ID"])
+                st.session_state.tee_time_labels[player_id] = "AM/PM"
+            st.success(f"Set {len(am_pm_players)} players to AM/PM")
+            st.rerun()
+    
+    with col2:
+        st.markdown("**Assign PM/AM Label**")
+        pm_am_players = st.multiselect(
+            "Select players with PM/AM tee times",
+            options=df["Player"].tolist(),
+            default=[p for p, label in st.session_state.tee_time_labels.items() 
+                    if label == "PM/AM" and p in df["Player"].values],
+            key="pm_am_select"
+        )
+        if st.button("✅ Set as PM/AM", key="set_pmam"):
+            for player in pm_am_players:
+                player_id = str(df[df["Player"] == player].iloc[0]["ID"])
+                st.session_state.tee_time_labels[player_id] = "PM/AM"
+            st.success(f"Set {len(pm_am_players)} players to PM/AM")
+            st.rerun()
+    
+    # Clear labels button
+    if st.button("🗑️ Clear All Tee Time Labels", key="clear_tee_labels"):
+        st.session_state.tee_time_labels = {}
+        st.success("All tee time labels cleared!")
+        st.rerun()
+    
+    # Show current label summary
+    if st.session_state.tee_time_labels:
+        st.subheader("Current Label Summary")
+        am_pm_count = sum(1 for label in st.session_state.tee_time_labels.values() if label == "AM/PM")
+        pm_am_count = sum(1 for label in st.session_state.tee_time_labels.values() if label == "PM/AM")
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("AM/PM Players", am_pm_count)
+        col2.metric("PM/AM Players", pm_am_count)
+        col3.metric("Unlabeled", len(df) - am_pm_count - pm_am_count)
+        
+        # Show labeled players
+        with st.expander("View All Labeled Players"):
+            labeled_data = []
+            for player_id, label in st.session_state.tee_time_labels.items():
+                player_row = df[df["ID"].astype(str) == player_id]
+                if not player_row.empty:
+                    labeled_data.append({
+                        "Player": player_row.iloc[0]["Player"],
+                        "Label": label,
+                        "Salary": player_row.iloc[0]["Salary"],
+                        "Projection": player_row.iloc[0]["Projection"]
+                    })
+            if labeled_data:
+                st.dataframe(pd.DataFrame(labeled_data), use_container_width=True, hide_index=True)
+
 
     if st.session_state.player_min_own or st.session_state.player_max_own:
         all_pids = set(list(st.session_state.player_min_own) + list(st.session_state.player_max_own))
@@ -431,6 +802,7 @@ def render_rule_engine():
         "Max players from team",
         "Min salary threshold",
         "Max salary on expensive players",
+        "Tee time constraints (AM/PM or PM/AM)",
     ])
     if rule_type == "At least one of (players)":
         picks = st.multiselect("Players", player_names, key="r1")
@@ -454,6 +826,28 @@ def render_rule_engine():
                 params={"players": picks, "min_count": min_count, "max_count": max_count}
             ))
             st.rerun()
+    
+    elif rule_type == "Tee time constraints (AM/PM or PM/AM)":
+        if not st.session_state.tee_time_labels:
+            st.warning("⚠️ No tee time labels assigned yet! Go to section 2.5 to assign labels first.")
+        else:
+            tee_label = st.radio("Constraint for:", ["AM/PM", "PM/AM"], key="tee_label_select")
+            c1, c2 = st.columns(2)
+            min_count = c1.number_input(f"Min {tee_label} players", 0, 6, 0, key="tee_min")
+            max_count = c2.number_input(f"Max {tee_label} players", 0, 6, 6, key="tee_max")
+            if st.button("Add Tee Time Rule", key="add_tee_rule") and min_count <= max_count:
+                st.session_state.rule_engine.add_rule(Rule(
+                    rule_type="tee_time_constraint",
+                    description=f"{min_count}-{max_count} players with {tee_label} tee times",
+                    params={
+                        "label": tee_label, 
+                        "min_count": min_count, 
+                        "max_count": max_count,
+                        "tee_time_labels": dict(st.session_state.tee_time_labels)
+                    }
+                ))
+                st.rerun()
+    
     elif rule_type == "Max players from team":
         teams = [t for t in df["Team"].unique().tolist() if t]
         if teams:
@@ -1139,6 +1533,7 @@ def main():
                 st.session_state.player_min_own = {}
                 st.session_state.player_max_own = {}
                 st.session_state.custom_rules = []
+                st.session_state.tee_time_labels = {}
                 st.session_state.exposure_manager = ExposureManager()
                 st.session_state.rule_engine = RuleEngine()
                 st.session_state.generated_lineups = None
@@ -1159,6 +1554,7 @@ def main():
                 st.session_state.player_min_own = {}
                 st.session_state.player_max_own = {}
                 st.session_state.custom_rules = []
+                st.session_state.tee_time_labels = {}
                 st.session_state.exposure_manager = ExposureManager()
                 st.session_state.rule_engine = RuleEngine()
                 st.session_state.generated_lineups = None
@@ -1172,6 +1568,7 @@ def main():
         st.markdown("""
 1. Upload DK CSV  
 2. Manage Player Pool  
+2.5. Tee Time Labels
 3. Select Game Mode  
 4. Set Optimization  
 5. Exposure Controls  
@@ -1183,6 +1580,7 @@ def main():
     render_file_upload()
     if st.session_state.validated_data is not None:
         render_player_pool()
+        render_tee_time_manager()
         render_game_mode_selector()
         settings = render_optimization_settings()
         render_exposure_controls()
