@@ -52,8 +52,14 @@ def normalize_dk_csv(df):
     df.columns = [c.strip().lstrip("\ufeff").strip('"') for c in df.columns]
     df = df.rename(columns={k: v for k, v in DK_COLUMN_MAP.items() if k in df.columns})
     
-    # Deduplicate if both "Points" and "DK Points" mapped to "Projection"
-    # (shouldn't happen but just in case)
+    # Check for required columns after mapping
+    required_cols = ["Player", "Salary", "Projection"]
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Missing required columns after normalization: {', '.join(missing)}. "
+            f"Your CSV must have 'Golfer', 'Salary' (or 'DK Salary'), and 'Points' (or 'DK Points')."
+        )
     
     if "Position" not in df.columns:
         df["Position"] = "G"
@@ -70,6 +76,13 @@ def normalize_dk_csv(df):
     for col in ["Salary", "Projection", "Ceiling", "Value", "Volatility"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+    
+    # Fill NaN values in Salary and Projection with 0 to avoid issues
+    if "Salary" in df.columns:
+        df["Salary"] = df["Salary"].fillna(0).astype(int)
+    if "Projection" in df.columns:
+        df["Projection"] = df["Projection"].fillna(0)
+    
     if "ID" not in df.columns:
         df["ID"] = range(1, len(df) + 1)
     else:
@@ -96,6 +109,7 @@ def initialize_session_state():
         "current_settings": {},  # Stores optimization settings for persistence
         "uploaded_filename": None,  # Track uploaded file name
         "tee_time_labels": {},  # Store tee time labels: {player_id: "AM/PM" or "PM/AM"}
+        "golfer_pairing_limits": [],  # Store pairing limits: [{"golfer_x": name, "golfer_y": name, "max_pct": 0.3}]
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1008,13 +1022,14 @@ def render_rule_engine():
     with st.expander("➕ Create Conditional Rule"):
         trigger = st.selectbox("IF I use…", player_names, key="trig")
         action  = st.selectbox("THEN…", [
-            "Boost another player's projection",
-            "Dock another player's projection",
+            "Boost projection of one or more players",
+            "Dock projection of one or more players",
             "Force % exposure of another player across lineups",
         ], key="act")
-        target  = st.selectbox("…apply to:", player_names, key="tgt")
-
+        
         if action == "Force % exposure of another player across lineups":
+            # Single target for exposure rules
+            target = st.selectbox("…apply to:", player_names, key="tgt")
             amount = st.slider(
                 "Use target player in this % of lineups where trigger is used",
                 1, 100, 50, key="cond_amt",
@@ -1025,7 +1040,7 @@ def render_rule_engine():
             if st.button("Save Conditional Rule"):
                 st.session_state.custom_rules.append({
                     "trigger": trigger,
-                    "target": target,
+                    "targets": [target],  # Store as list for consistency
                     "direction": "exposure",
                     "amount": amount,
                     "label": label or f"If {trigger} → use {target} {amount}% of the time"
@@ -1033,17 +1048,25 @@ def render_rule_engine():
                 st.success("Rule saved!")
                 st.rerun()
         else:
+            # Multiple targets for boost/dock
+            targets = st.multiselect(
+                "…apply to these players:",
+                options=[p for p in player_names if p != trigger],
+                key="tgt_multi",
+                help="Select one or more players to boost/dock when the trigger player is used"
+            )
             amount = st.slider("By % amount", 1, 100, 10, key="cond_amt")
             label  = st.text_input("Label (optional)", key="cond_note",
-                                   placeholder="e.g. Scheffler + Rory stack")
-            if st.button("Save Conditional Rule"):
+                                   placeholder="e.g. Scheffler stack")
+            if st.button("Save Conditional Rule") and targets:
                 direction = "boost" if "Boost" in action else "dock"
+                target_list = ", ".join(targets)
                 st.session_state.custom_rules.append({
                     "trigger": trigger,
-                    "target": target,
+                    "targets": targets,  # Store as list
                     "direction": direction,
                     "amount": amount,
-                    "label": label or f"If {trigger} → {direction} {target} {amount}%"
+                    "label": label or f"If {trigger} → {direction} {target_list} by {amount}%"
                 })
                 st.success("Rule saved!")
                 st.rerun()
@@ -1056,6 +1079,74 @@ def render_rule_engine():
             if c2.button("🗑️", key=f"del_cr_{i}"):
                 st.session_state.custom_rules.pop(i)
                 st.rerun()
+    
+    # ── GOLFER PAIRING LIMITS ──
+    st.divider()
+    st.subheader("⛓️ Golfer Pairing Limits")
+    st.caption("Limit how often Golfer Y can appear in lineups that contain Golfer X")
+    
+    with st.expander("➕ Add Pairing Limit", expanded=False):
+        st.markdown("**Example:** If Scottie is in a lineup, limit Collin to appearing in only 30% of those Scottie lineups")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            golfer_x = st.selectbox(
+                "If lineup has...",
+                player_names,
+                key="pairing_x",
+                help="Primary golfer (e.g., Scottie Scheffler)"
+            )
+        
+        with col2:
+            golfer_y = st.selectbox(
+                "Then limit...",
+                player_names,
+                key="pairing_y",
+                help="Golfer to limit (e.g., Collin Morikawa)"
+            )
+        
+        with col3:
+            max_pct = st.number_input(
+                "Max % allowed",
+                min_value=0,
+                max_value=100,
+                value=30,
+                step=5,
+                key="pairing_pct",
+                help="Maximum % of Golfer X lineups that can also contain Golfer Y"
+            )
+        
+        if st.button("Add Pairing Limit", type="primary", key="add_pairing"):
+            if golfer_x == golfer_y:
+                st.error("❌ Golfer X and Golfer Y cannot be the same")
+            else:
+                # Check if this pairing already exists
+                existing = [p for p in st.session_state.golfer_pairing_limits 
+                           if p["golfer_x"] == golfer_x and p["golfer_y"] == golfer_y]
+                if existing:
+                    st.warning(f"⚠️ A limit for {golfer_x} → {golfer_y} already exists. Delete it first to update.")
+                else:
+                    st.session_state.golfer_pairing_limits.append({
+                        "golfer_x": golfer_x,
+                        "golfer_y": golfer_y,
+                        "max_pct": max_pct / 100  # Store as decimal
+                    })
+                    st.success(f"✅ Added: If {golfer_x} is in lineup → {golfer_y} in max {max_pct}% of those lineups")
+                    st.rerun()
+    
+    # Show active pairing limits
+    if st.session_state.golfer_pairing_limits:
+        st.markdown("**Active Pairing Limits:**")
+        for i, limit in enumerate(st.session_state.golfer_pairing_limits):
+            c1, c2 = st.columns([5, 1])
+            pct_display = int(limit["max_pct"] * 100)
+            c1.write(f"• If **{limit['golfer_x']}** in lineup → **{limit['golfer_y']}** in max **{pct_display}%** of those lineups")
+            if c2.button("🗑️", key=f"del_pairing_{i}"):
+                st.session_state.golfer_pairing_limits.pop(i)
+                st.rerun()
+    else:
+        st.info("💡 No pairing limits set. Add one above to prevent specific golfer combinations from appearing too frequently together.")
 
 
 def apply_conditional_rules_to_pool(df, lineup_so_far):
@@ -1065,11 +1156,17 @@ def apply_conditional_rules_to_pool(df, lineup_so_far):
     for rule in st.session_state.custom_rules:
         # Only apply projection rules here; exposure rules handled post-generation
         if rule["direction"] in ("boost", "dock") and rule["trigger"] in lineup_names:
-            mask = df["Player"] == rule["target"]
-            if mask.any():
-                mult = (1 + rule["amount"] / 100 if rule["direction"] == "boost"
-                        else 1 - rule["amount"] / 100)
-                df.loc[mask, "Projection"] *= mult
+            # Handle both new format (targets list) and old format (target string)
+            targets = rule.get("targets", [rule.get("target")]) if "targets" in rule or "target" in rule else []
+            
+            mult = (1 + rule["amount"] / 100 if rule["direction"] == "boost"
+                    else 1 - rule["amount"] / 100)
+            
+            for target_name in targets:
+                if target_name:
+                    mask = df["Player"] == target_name
+                    if mask.any():
+                        df.loc[mask, "Projection"] *= mult
     return df
 
 
@@ -1122,6 +1219,78 @@ def enforce_global_max_ownership(lineups, max_ownership_pct):
     return kept_lineups if kept_lineups else lineups[:1]
 
 
+def enforce_golfer_pairing_limits(lineups):
+    """
+    Enforce golfer pairing limits: If Golfer X is in a lineup, limit how often Golfer Y can appear.
+    
+    For each pairing limit:
+    - Find all lineups containing Golfer X
+    - Count how many also contain Golfer Y
+    - If exceeds limit, remove lineups containing both until within limit
+    """
+    if not st.session_state.golfer_pairing_limits:
+        return lineups
+    
+    filtered_lineups = lineups.copy()
+    removal_log = []
+    
+    for limit in st.session_state.golfer_pairing_limits:
+        golfer_x = limit["golfer_x"]
+        golfer_y = limit["golfer_y"]
+        max_pct = limit["max_pct"]
+        
+        # Find lineups containing Golfer X
+        lineups_with_x = []
+        for lu in filtered_lineups:
+            lineup_players = [p["Player"] for p in lu]
+            if golfer_x in lineup_players:
+                lineups_with_x.append(lu)
+        
+        if not lineups_with_x:
+            continue  # No lineups with Golfer X, skip this limit
+        
+        # Find lineups with BOTH X and Y
+        lineups_with_both = []
+        for lu in lineups_with_x:
+            lineup_players = [p["Player"] for p in lu]
+            if golfer_y in lineup_players:
+                lineups_with_both.append(lu)
+        
+        # Calculate current percentage
+        current_count = len(lineups_with_both)
+        total_x_lineups = len(lineups_with_x)
+        current_pct = current_count / total_x_lineups if total_x_lineups > 0 else 0
+        
+        # If over limit, remove excess lineups
+        if current_pct > max_pct:
+            allowed_count = int(total_x_lineups * max_pct)
+            excess_count = current_count - allowed_count
+            
+            if excess_count > 0:
+                # Remove excess lineups (remove from the end to preserve highest-value lineups)
+                lineups_to_remove = lineups_with_both[-excess_count:]
+                
+                for lu in lineups_to_remove:
+                    if lu in filtered_lineups:
+                        filtered_lineups.remove(lu)
+                
+                removal_log.append({
+                    "golfer_x": golfer_x,
+                    "golfer_y": golfer_y,
+                    "removed": excess_count,
+                    "was_pct": int(current_pct * 100),
+                    "now_pct": int(max_pct * 100)
+                })
+    
+    # Store removal log in session state for display
+    if removal_log:
+        st.session_state.pairing_limit_removals = removal_log
+    
+    return filtered_lineups
+
+
+
+
 def enforce_combinatorial_ownership_bounds(lineups, min_own, max_own):
     """
     Filter lineups based on combinatorial ownership bounds.
@@ -1160,8 +1329,12 @@ def enforce_exposure_conditional_rules(lineups, player_pool):
 
     for rule in exposure_rules:
         trigger_name = rule["trigger"]
-        target_name  = rule["target"]
-        pct          = rule["amount"] / 100.0
+        # Handle both new format (targets list) and old format (target string)
+        targets = rule.get("targets", [rule.get("target")]) if "targets" in rule or "target" in rule else []
+        if not targets or not targets[0]:
+            continue
+        target_name = targets[0]  # Exposure rules only support single target
+        pct = rule["amount"] / 100.0
 
         # Find target player data
         target_data = player_pool[player_pool["Player"] == target_name]
@@ -1296,10 +1469,18 @@ def render_optimization_button(settings):
     if st.button("🚀 Generate Lineups", type="primary", use_container_width=True):
         with st.spinner("Optimizing…"):
             try:
+                # Clear stale validation errors from previous runs
+                if hasattr(st.session_state, 'validation_errors'):
+                    delattr(st.session_state, 'validation_errors')
+                
                 adjusted = st.session_state.exposure_manager.apply_projection_adjustments(df)
                 # Apply conditional rules (use empty lineup as starting context)
                 adjusted = apply_conditional_rules_to_pool(adjusted, [])
                 game_mode = GameModes.get_mode(st.session_state.game_mode)
+                
+                # Store game mode object for use in display
+                st.session_state.current_game_mode = game_mode
+                
                 locked = st.session_state.exposure_manager.get_locked_players()
                 
                 # Generate extra lineups to account for post-filtering
@@ -1351,6 +1532,10 @@ def render_optimization_button(settings):
                 )
                 after_comb_own = len(lineups)
                 
+                # Enforce golfer pairing limits
+                lineups = enforce_golfer_pairing_limits(lineups)
+                after_pairing_limits = len(lineups)
+                
                 # Validate all lineups for salary cap and roster size violations
                 lineups = validate_and_fix_lineups(
                     lineups, 
@@ -1386,8 +1571,10 @@ def render_optimization_button(settings):
                             st.write(f"**After global max ownership:** {after_global_max} (-{after_exposure - after_global_max})")
                         if after_comb_own < after_global_max:
                             st.write(f"**After combinatorial ownership filter:** {after_comb_own} (-{after_global_max - after_comb_own})")
-                        if after_validation < after_comb_own:
-                            st.write(f"**After validation (salary/roster):** {after_validation} (-{after_comb_own - after_validation})")
+                        if after_pairing_limits < after_comb_own:
+                            st.write(f"**After golfer pairing limits:** {after_pairing_limits} (-{after_comb_own - after_pairing_limits})")
+                        if after_validation < after_pairing_limits:
+                            st.write(f"**After validation (salary/roster):** {after_validation} (-{after_pairing_limits - after_validation})")
                         st.write(f"**Final count:** {len(lineups)} lineups")
                         
                         if len(lineups) < requested_count:
@@ -1401,6 +1588,18 @@ def render_optimization_button(settings):
                             """)
                 
                 st.success(f"✅ Generated {len(lineups)} valid unique lineups!")
+                
+                # Show pairing limit removals if any occurred
+                if hasattr(st.session_state, 'pairing_limit_removals') and st.session_state.pairing_limit_removals:
+                    with st.expander("⛓️ Golfer Pairing Limits Applied", expanded=True):
+                        for removal in st.session_state.pairing_limit_removals:
+                            st.write(
+                                f"• **{removal['golfer_x']}** + **{removal['golfer_y']}**: "
+                                f"Reduced from {removal['was_pct']}% to {removal['now_pct']}% "
+                                f"({removal['removed']} lineups removed)"
+                            )
+                    # Clear the log for next generation
+                    st.session_state.pairing_limit_removals = []
             except Exception as e:
                 st.error(f"❌ Error: {e}")
                 import traceback; st.code(traceback.format_exc())
@@ -1410,90 +1609,215 @@ def render_lineup_results():
     if not st.session_state.generated_lineups:
         return
 
-    st.header("8️⃣ Generated Lineups")
+    st.header("8️⃣ Generated Lineups & Analysis")
     lineups = st.session_state.generated_lineups
 
-    # ── Sort controls ──
-    c1, c2 = st.columns([2, 2])
-    sort_by = c1.selectbox("Sort by", ["Projection", "Salary", "Avg Ownership", "Combinatorial Ownership"])
-    show_lineups = c2.toggle("Show All Lineup Tables", value=True,
-                             help="Toggle off to hide individual lineup tables and save space")
-
-    # Build stats
+    # Build stats for all lineups first
     stats_list = []
     for i, lu in enumerate(lineups):
         s = OptimizerEngine.calculate_lineup_stats(lu)
         s["lineup_num"] = i + 1
+        s["lineup_data"] = lu  # Store lineup data for filtering
         stats_list.append(s)
 
-    key_map = {
-        "Projection":             ("total_projection",      True),
-        "Salary":                 ("total_salary",          True),
-        "Avg Ownership":          ("avg_ownership",         False),
-        "Combinatorial Ownership":("combinatorial_ownership",False),
-    }
-    sk, rev = key_map[sort_by]
-    stats_list.sort(key=lambda x: x[sk], reverse=rev)
-
-    # ── Summary table (always visible) ──
-    st.subheader("Summary")
-    summary = pd.DataFrame([{
-        "Lineup":     s["lineup_num"],
-        "Projection": f"{s['total_projection']:.2f}",
-        "Salary":     f"${s['total_salary']:,}",
-        "Comb Own":   f"{s['combinatorial_ownership']:.2%}",
-    } for s in stats_list])
-    st.dataframe(summary, use_container_width=True)
-
-    # ── Individual lineup tables (toggleable) ──
-    if show_lineups:
-        st.subheader("Individual Lineups")
-
-        # Respect sort order
-        sorted_lineups = [lineups[s["lineup_num"] - 1] for s in stats_list]
-
-        for rank, (stats, lu) in enumerate(zip(stats_list, sorted_lineups), start=1):
-            lu_num = stats["lineup_num"]
-
-            with st.expander(
-                f"Lineup #{lu_num}  |  "
-                f"Proj: {stats['total_projection']:.1f}  |  "
-                f"Salary: ${stats['total_salary']:,}  |  "
-                f"Comb Own: {stats['combinatorial_ownership']:.2%}"
-                + (" ⚠️ OVER CAP" if stats['total_salary'] > 50000 else ""),
-                expanded=True
-            ):
-                lu_df = pd.DataFrame(lu)
-                disp_cols = [c for c in ["Player", "Position", "Salary", "Projection", "Ownership"]
-                             if c in lu_df.columns]
-                lu_df_disp = lu_df[disp_cols].copy()
-
-                # Format ownership as %
-                if "Ownership" in lu_df_disp.columns:
-                    lu_df_disp["Ownership"] = lu_df_disp["Ownership"].apply(lambda x: f"{x:.1%}")
-
-                # ── TOTALS ROW ──
-                totals = {}
-                for col in disp_cols:
-                    if col == "Player":
-                        totals[col] = "⚡ TOTAL"
-                    elif col == "Position":
-                        totals[col] = ""
-                    elif col == "Salary":
-                        totals[col] = f"${stats['total_salary']:,}"
-                    elif col == "Projection":
-                        totals[col] = f"{stats['total_projection']:.2f}"
-                    elif col == "Ownership":
-                        totals[col] = f"{stats['combinatorial_ownership']:.2%}"
-
-                totals_df = pd.DataFrame([totals])
-                combined = pd.concat([lu_df_disp, totals_df], ignore_index=True)
-
-                st.dataframe(combined, use_container_width=True, hide_index=True)
-
-    # ── Export ──
-    st.subheader("Export")
-
+    # ── CONTROLS SECTION ──
+    st.subheader("🎛️ Controls")
+    
+    col1, col2 = st.columns([2, 2])
+    
+    # Sort dropdown
+    with col1:
+        sort_by = st.selectbox(
+            "Sort by",
+            [
+                "Ownership (High to Low)",
+                "Ownership (Low to High)",
+                "Projection (High to Low)",
+                "Projection (Low to High)",
+                "Default Order"
+            ],
+            help="Choose how to sort your lineups"
+        )
+    
+    # Get all unique players from all lineups
+    all_players = set()
+    for lu in lineups:
+        for p in lu:
+            all_players.add(p["Player"])
+    all_players = sorted(all_players)
+    
+    # Player filter
+    with col2:
+        selected_players = st.multiselect(
+            "Filter by golfer(s)",
+            options=all_players,
+            default=[],
+            help="Select one or more golfers to see lineups containing them"
+        )
+    
+    # Filter lineups based on selected players
+    filtered_stats = stats_list.copy()
+    if selected_players:
+        filtered_stats = []
+        for s in stats_list:
+            lineup_players = [p["Player"] for p in s["lineup_data"]]
+            # Check if ALL selected players are in this lineup
+            if all(player in lineup_players for player in selected_players):
+                filtered_stats.append(s)
+        
+        if not filtered_stats:
+            st.warning(f"⚠️ No lineups found containing all: {', '.join(selected_players)}")
+            return
+    
+    # Apply sorting
+    if sort_by == "Ownership (High to Low)":
+        filtered_stats.sort(key=lambda x: x["combinatorial_ownership"], reverse=True)
+    elif sort_by == "Ownership (Low to High)":
+        filtered_stats.sort(key=lambda x: x["combinatorial_ownership"], reverse=False)
+    elif sort_by == "Projection (High to Low)":
+        filtered_stats.sort(key=lambda x: x["total_projection"], reverse=True)
+    elif sort_by == "Projection (Low to High)":
+        filtered_stats.sort(key=lambda x: x["total_projection"], reverse=False)
+    # else: Default Order (no sorting)
+    
+    # ── OWNERSHIP ANALYTICS (when golfers selected) ──
+    if selected_players:
+        st.divider()
+        st.subheader("📊 Ownership Analytics")
+        
+        # Calculate stats for filtered lineups
+        total_filtered = len(filtered_stats)
+        avg_ownership = sum(s["combinatorial_ownership"] for s in filtered_stats) / total_filtered
+        avg_projection = sum(s["total_projection"] for s in filtered_stats) / total_filtered
+        
+        # Summary metrics
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Lineups Found", total_filtered)
+        col2.metric("Avg Total Ownership", f"{avg_ownership:.1%}")
+        col3.metric("Avg Total Projection", f"{avg_projection:.1f} pts")
+        
+        st.markdown("**Other golfers in these lineups:**")
+        st.caption("Shows which golfers appear alongside your selected player(s) and how often")
+        
+        # Build golfer appearance data
+        golfer_counts = {}
+        for s in filtered_stats:
+            for player in s["lineup_data"]:
+                player_name = player["Player"]
+                if player_name not in selected_players:  # Exclude selected players
+                    if player_name not in golfer_counts:
+                        golfer_counts[player_name] = {
+                            "count": 0,
+                            "total_ownership": 0,
+                            "total_projection": 0,
+                            "salary": player["Salary"]
+                        }
+                    golfer_counts[player_name]["count"] += 1
+                    golfer_counts[player_name]["total_ownership"] += player["Ownership"]
+                    golfer_counts[player_name]["total_projection"] += player["Projection"]
+        
+        # Calculate percentages and averages
+        analytics_data = []
+        for player_name, data in golfer_counts.items():
+            appearance_pct = (data["count"] / total_filtered) * 100
+            avg_own = data["total_ownership"] / data["count"]
+            avg_proj = data["total_projection"] / data["count"]
+            
+            analytics_data.append({
+                "Golfer": player_name,
+                "Appears In": f"{data['count']} lineups",
+                "Appearance %": appearance_pct,
+                "Avg Own": avg_own * 100,  # Convert to percentage
+                "Avg Proj": avg_proj,
+                "Salary": data["salary"]
+            })
+        
+        # Sort by appearance percentage
+        analytics_data.sort(key=lambda x: x["Appearance %"], reverse=True)
+        
+        if analytics_data:
+            # Create tabs for table and chart
+            tab1, tab2 = st.tabs(["📋 Table View", "📊 Chart View"])
+            
+            with tab1:
+                # Show top golfers in table format
+                analytics_df = pd.DataFrame(analytics_data)
+                
+                # Format for display
+                display_df = analytics_df.copy()
+                display_df["Appearance %"] = display_df["Appearance %"].apply(lambda x: f"{x:.1f}%")
+                display_df["Avg Own"] = display_df["Avg Own"].apply(lambda x: f"{x:.1f}%")
+                display_df["Avg Proj"] = display_df["Avg Proj"].apply(lambda x: f"{x:.1f}")
+                display_df["Salary"] = display_df["Salary"].apply(lambda x: f"${x:,}")
+                
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Appearance %": st.column_config.TextColumn("Appearance %", help="% of filtered lineups this golfer appears in")
+                    }
+                )
+                
+                # Highlight clustering issues
+                high_correlation = [d for d in analytics_data if d["Appearance %"] > 80]
+                if high_correlation:
+                    st.warning(f"⚠️ **Clustering Alert:** {len(high_correlation)} golfer(s) appear in >80% of these lineups")
+                    for golfer_data in high_correlation[:5]:  # Show top 5
+                        st.write(f"• **{golfer_data['Golfer']}** in {golfer_data['Appearance %']:.0f}% of lineups")
+            
+            with tab2:
+                # Bar chart of appearance rates
+                chart_df = pd.DataFrame(analytics_data[:15])  # Top 15 golfers
+                
+                if not chart_df.empty:
+                    st.bar_chart(
+                        chart_df,
+                        x="Golfer",
+                        y="Appearance %",
+                        use_container_width=True
+                    )
+                    st.caption("Showing top 15 golfers by appearance rate")
+        else:
+            st.info("No other golfers found in these lineups")
+    
+    # ── LINEUP CARDS ──
+    st.divider()
+    st.subheader(f"🎴 Lineups ({len(filtered_stats)} shown)")
+    
+    # Display lineups as compact cards
+    for rank, stats in enumerate(filtered_stats, start=1):
+        lineup = stats["lineup_data"]
+        
+        # Create a card-like container
+        with st.container():
+            # Header row with lineup number and key stats
+            col1, col2, col3, col4 = st.columns([1, 2, 2, 2])
+            
+            col1.markdown(f"**#{stats['lineup_num']}**")
+            col2.markdown(f"**{stats['total_projection']:.1f}** pts")
+            col3.markdown(f"**${stats['total_salary']:,}**")
+            col4.markdown(f"**{stats['combinatorial_ownership']:.1%}** total own")
+            
+            # Player rows - compact display
+            player_cols = st.columns([3, 2, 2, 2])
+            player_cols[0].caption("Golfer")
+            player_cols[1].caption("Salary")
+            player_cols[2].caption("Proj")
+            player_cols[3].caption("Own")
+            
+            for player in lineup:
+                player_cols = st.columns([3, 2, 2, 2])
+                player_cols[0].write(player["Player"])
+                player_cols[1].write(f"${player['Salary']:,}")
+                player_cols[2].write(f"{player['Projection']:.1f}")
+                player_cols[3].write(f"{player['Ownership']:.1%}")
+            
+            st.divider()
+    
+    # ── EXPORT SECTION ──
+    st.subheader("📥 Export")
+    
     c1, c2 = st.columns(2)
 
     # Standard CSV (internal use)
